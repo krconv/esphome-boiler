@@ -1,0 +1,7 @@
+secrets.yaml
+.venv/
+.esphome/
+out/
+test/test_core
+*.log
+__pycache__/

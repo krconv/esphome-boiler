@@ -1,0 +1,171 @@
+# Boiler display-bus sniffer: Olimex ESP32-POE (non-ISO) -> Home Assistant
+# Passive: listens to the boiler's 2-wire display link through a 50k/10k divider on GPIO35.
+# GPIO32 (TX, NPN to the bus) is held LOW in firmware and never transmitted on.
+#
+# This is the dashboard version (component fetched from git). boiler.local.yaml is the same file with the
+# component taken from ./components, for building from a checkout.
+
+esphome:
+  name: boiler
+  friendly_name: Boiler
+
+esp32:
+  board: esp32-poe
+  framework:
+    type: esp-idf
+
+ethernet:
+  type: LAN8720
+  mdc_pin: GPIO23
+  mdio_pin: GPIO18
+  clk_mode: GPIO17_OUT
+  phy_addr: 0
+  power_pin: GPIO12
+
+logger:
+  level: INFO
+  # Debug: set level: DEBUG (adds first-sight of unmapped registers) and log_frames: true under boiler_bus
+  # to print every decoded frame.
+
+api:
+  id: api_server
+  encryption:
+    key: !secret boiler_api_key
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+    password: !secret boiler_ota_password
+
+web_server:
+  port: 80
+  version: 3
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/krconv/esphome-boiler
+      ref: main
+      # refresh: 5min   # lower this while iterating on the component
+    components: [boiler_bus]
+
+# ---- 1-Wire (DS18B20 probes, 3-wire powered, external 5k pull-up) -------------------------------
+# Every probe found is logged at boot ("Found devices:" in the one_wire log, address as 0x<16 hex>).
+# Read the log once, then add sensors like below (address: or index: 0, 1, ... in discovery order).
+one_wire:
+  - platform: gpio
+    pin: GPIO33
+
+# sensor:
+#   - platform: dallas_temp
+#     name: "Boiler Probe 1"
+#     address: 0x1234567890abcdef     # from the boot log; or  index: 0
+#     update_interval: 30s
+#     resolution: 12
+
+# ---- Boiler bus -------------------------------------------------------------------------------
+boiler_bus:
+  id: boiler_bus_hub
+  adc_pin: GPIO35          # ADC1_CH7, 12 dB attenuation, continuous DMA sampling
+  tx_pin: GPIO32           # held LOW, never used to transmit
+  sample_rate: 100000      # samples/s
+  dip_depth_mv: 170        # expected dip depth at the ADC pin
+  dip_threshold_mv: 85     # ~half the depth; with auto_threshold it tracks 0.5 x measured depth
+  auto_threshold: true
+  assume_high_word_zero: true
+  fan_stale_timeout: 10s
+  # log_frames: true
+
+  # status register 0010
+  pump:
+    name: "Pump"
+  ch_demand:
+    name: "CH Demand"
+  spark:
+    name: "Spark"
+  flame:
+    name: "Flame"
+  dhw_demand:
+    name: "DHW Demand"
+  state:
+    name: "State"
+  status_raw:
+    name: "Status Raw"
+
+  # temperatures
+  supply_temperature:
+    name: "Supply Temperature"
+  return_temperature:
+    name: "Return Temperature"
+  cold_in_temperature:
+    name: "Cold In Temperature"
+  dhw_out_temperature:
+    name: "DHW Out Temperature"
+  exhaust_temperature:
+    name: "Exhaust Temperature"
+  unknown_temperature:
+    name: "Unknown Temperature 0023"
+
+  # setpoints
+  ch_setpoint:
+    name: "CH Setpoint"
+  dhw_setpoint:
+    name: "DHW Setpoint"
+
+  # counters
+  power_on_hours:
+    name: "Power-On Hours"
+  ch_burner_hours:
+    name: "CH Burner Hours"
+  dhw_burner_hours:
+    name: "DHW Burner Hours"
+  ch_ignitions:
+    name: "CH Ignitions"
+  dhw_counter:
+    name: "DHW Counter"
+  pump_hours:
+    name: "Pump Hours"
+
+  # only update while the display sits on a status screen
+  flow:
+    name: "Flow"
+  fan_rpm:
+    name: "Fan Speed"
+  water_pressure:
+    name: "Water Pressure"
+  flame_sensor:
+    name: "Flame Sensor"
+  error_history:
+    name: "Error History"
+
+  # gas estimate (rough: linear from fan RPM, flame on, fan data < fan_stale_timeout old)
+  gas_btu_h:
+    name: "Gas Input"
+  propane_gal_h:
+    name: "Propane Rate"
+  propane_total:
+    name: "Propane Used"
+
+  # diagnostics
+  frames_per_second:
+    name: "Bus Frames per Second"
+  frames_ok:
+    name: "Bus Frames OK"
+  crc_errors:
+    name: "Bus CRC Errors"
+  malformed_frames:
+    name: "Bus Malformed Frames"
+  unknown_frames:
+    name: "Bus Unmapped Register Frames"
+  adc_overruns:
+    name: "ADC Overruns"
+  adc_baseline:
+    name: "ADC Baseline"
+  dip_depth:
+    name: "ADC Dip Depth"
+  bit_period:
+    name: "Bus Bit-0 Period"
+  last_frame_age:
+    name: "Last Frame Age"
+  bus_active:
+    name: "Bus Active"
