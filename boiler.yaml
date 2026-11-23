@@ -191,6 +191,8 @@ boiler_bus:
     name: "TX Dip Depth"
   tx_dip_depth_bus:
     name: "TX Dip Depth Bus"
+  tx_bursts:
+    name: "TX Bursts Sent"
   tx_last_result:
     name: "TX Last Result"
 

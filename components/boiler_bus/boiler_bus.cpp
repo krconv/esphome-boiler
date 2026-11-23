@@ -26,6 +26,7 @@ static constexpr size_t ADC_POOL_BYTES = 16384;
 // transmit guards (see boiler_core.h for the pulse limits)
 static constexpr int64_t TX_MIN_SPACING_US = 1000000;  // never more than one transmission per second
 static constexpr float TEST_IDLE_MIN_US = 2000, TEST_IDLE_MAX_US = 8000;  // test pattern: 2..8 ms into the quiet gap
+static constexpr float TEST_SILENT_US = 150000;  // bus silent this long (display unplugged): no traffic to collide with
 static constexpr float REQ_IDLE_MIN_US = 3000, REQ_IDLE_MAX_US = 5000;    // request: 3..5 ms after a board reply (44 ms gap)
 static constexpr uint32_t TX_PROBE_TAIL_US = 6000;        // sample window kept after a test pattern
 static constexpr uint32_t TX_PROBE_TAIL_FRAME_US = 2500;  // ... after a frame (next display request is >= 44 ms after the reply)
@@ -44,8 +45,8 @@ void BoilerBus::drive_tx_low_() {
 void BoilerBus::setup() {
   this->drive_tx_low_();
   this->us_per_sample_ = 1e6f / (float) this->sample_rate_;
+  // NB: no gpio_set_direction() after this: it would disconnect the RMT output from the pin
   this->tx_ok_ = this->tx_init_();
-  if (this->tx_ok_) this->drive_tx_low_();
   if (this->tx_last_result_text_sensor_) this->tx_last_result_text_sensor_->publish_state("idle");
 
   this->pref_ = global_preferences->make_preference<float>(fnv1_hash("boiler_bus_propane_total"));
@@ -277,9 +278,11 @@ void BoilerBus::tx_service_(bool drained) {
   const bool want_req = this->tx_req_pending_.load();
   const bool want_test = this->tx_test_on_.load();
   if (!want_req && !want_test) return;
-  if (!this->bursts_->seen_dip() || this->dips_->in_dip()) return;
+  if (this->dips_->in_dip()) return;
   if (now - this->last_tx_us_ < TX_MIN_SPACING_US) return;
-  const float idle_us = float(this->dips_->index() - this->bursts_->last_dip_index()) * this->us_per_sample_;
+  // quiet time as the sampler sees it; with no dip ever seen it is the time since sampling started
+  const uint64_t since = this->bursts_->seen_dip() ? this->bursts_->last_dip_index() : 0;
+  const float idle_us = float(this->dips_->index() - since) * this->us_per_sample_;
 
   if (want_req) {
     // a 31 ms frame only fits in the ~44 ms gap after a board reply (the gap after a display request is ~21 ms)
@@ -300,12 +303,12 @@ void BoilerBus::tx_service_(bool drained) {
     }
     return;  // keep the pattern out of the gap a request is waiting for
   }
-  if (want_test && now - this->last_test_us_ >= TX_MIN_SPACING_US && idle_us >= TEST_IDLE_MIN_US && idle_us <= TEST_IDLE_MAX_US) {
+  if (want_test && now - this->last_test_us_ >= TX_MIN_SPACING_US && (idle_us >= TEST_IDLE_MIN_US && idle_us <= TEST_IDLE_MAX_US || idle_us >= TEST_SILENT_US)) {
     const uint32_t n = this->tx_dip_count_.load();
     auto p = boiler::tx_test_pattern(n, this->tx_dip_us_.load());
     if (this->tx_fire_(p, false, n)) {
       this->last_tx_us_ = this->last_test_us_ = now;
-      this->test_bursts_++;
+      this->test_bursts_.fetch_add(1);
     }
   }
 }
@@ -682,6 +685,7 @@ void BoilerBus::publish_diagnostics_(uint32_t now) {
     this->pub_(this->adc_baseline_sensor_, this->counts_to_mv_(base), now);
     this->pub_(this->dip_depth_sensor_, this->depth_counts_.load() * this->mv_per_count_, now);
   }
+  this->pub_(this->tx_bursts_sensor_, (float) this->test_bursts_.load(), now);
   this->pub_(this->malformed_short_sensor_, (float) this->malformed_short_.load(), now);
   this->pub_(this->malformed_long_sensor_, (float) this->malformed_long_.load(), now);
   this->pub_(this->rejected_dips_sensor_, (float) this->rejected_dips_.load(), now);

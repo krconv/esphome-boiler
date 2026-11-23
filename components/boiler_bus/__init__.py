@@ -103,6 +103,7 @@ SENSORS = {
     "rejected_dips": _s(None, 0, None, INC, None, CAT),  # dips thrown away as too narrow / too wide
     # transmit test: depth of the dips we generate (mV at the ADC, and the equivalent on the bus)
     "tx_dip_depth": _s("mV", 0, None, MEAS, "mdi:flash", CAT),
+    "tx_bursts": _s(None, 0, None, INC, "mdi:flash", CAT),  # test patterns sent since boot
     "tx_dip_depth_bus": _s(UNIT_VOLT, 2, DEVICE_CLASS_VOLTAGE, MEAS, "mdi:flash", CAT),
 }
 

@@ -33,7 +33,7 @@ namespace boiler_bus {
   X(gas_btu_h) X(propane_gal_h) X(propane_total) \
   X(frames_per_second) X(frames_ok) X(crc_errors) X(malformed_frames) X(unknown_frames) X(adc_overruns) \
   X(adc_baseline) X(dip_depth) X(bit_period) X(last_frame_age) \
-  X(malformed_short) X(malformed_long) X(dip_width) X(rejected_dips) X(tx_dip_depth) X(tx_dip_depth_bus)
+  X(malformed_short) X(malformed_long) X(dip_width) X(rejected_dips) X(tx_dip_depth) X(tx_dip_depth_bus) X(tx_bursts)
 #define BOILER_BINARY_SENSORS(X) X(pump) X(ch_demand) X(spark) X(flame) X(dhw_demand) X(bus_active)
 #define BOILER_TEXT_SENSORS(X) X(state) X(status_raw) X(error_history) X(tx_last_result) X(malformed_info)
 
@@ -148,7 +148,7 @@ class BoilerBus : public Component {
   std::vector<float> tx_depths_;
   bool last_burst_board_{false};
   float us_per_sample_{10.0f};
-  uint32_t test_bursts_{0};
+  std::atomic<uint32_t> test_bursts_{0};
 
   // request tracking (main loop)
   enum class Req : uint8_t { IDLE, WAIT_SLOT, SENT, WAIT_RESP };
