@@ -132,6 +132,7 @@ struct Wave {
   double depth;       // counts
   double noise;       // sigma counts
   double drift = 0;   // counts per second
+  double notch_p = 0; // probability that a sample inside a dip reads the idle level (ADC dropout)
   std::vector<uint16_t> s;
   double t_end = 0;   // seconds, end of what has been scheduled
   std::vector<std::pair<double, double>> dips;  // [start,end) s
@@ -159,6 +160,7 @@ struct Wave {
       double cover = 0;
       for (size_t k = d; k < dips.size() && dips[k].first < t1; k++)
         cover += std::max(0.0, std::min(t1, dips[k].second) - std::max(t0, dips[k].first)) * rate;
+      if (notch_p > 0 && cover >= 1.0 && std::uniform_real_distribution<double>(0, 1)(rng) < notch_p) cover = 0;
       double v = base + drift * t0 - depth * std::min(1.0, cover) + nz(rng);
       s[i] = uint16_t(std::max(0.0, std::min(4095.0, v)));
     }
@@ -191,8 +193,9 @@ static RunResult run_wave(const Wave &w, double nominal_rate, DipDetectorConfig 
 }
 
 static void scenario(const char *name, double rate, double nominal_rate, double base, double depth, double noise,
-                     double drift, DipDetectorConfig cfg, int nframes, int min_ok_pct) {
+                     double drift, DipDetectorConfig cfg, int nframes, int min_ok_pct, double notch_p = 0) {
   Wave w;
+  w.notch_p = notch_p;
   w.rate = rate; w.base = base; w.depth = depth; w.noise = noise; w.drift = drift;
   std::vector<Frame> sent;
   size_t k = 0;
@@ -223,6 +226,8 @@ static void test_waveforms() {
   scenario("baseline drift 20 counts/s (16 mV/s)", 100e3, 100e3, 2400, 210, 15, 20, cfg, 400, 100);
   scenario("shallow dips 120 counts, auto depth", 100e3, 100e3, 2400, 120, 12, 0, cfg, 400, 100);
   scenario("deep dips 400 counts, auto depth", 100e3, 100e3, 2400, 400, 15, 0, cfg, 400, 100);
+  scenario("ADC dropouts: 15% of in-dip samples read idle", 100e3, 100e3, 2400, 210, 8, 0, cfg, 400, 98, 0.15);
+  scenario("ADC dropouts: 30% of in-dip samples read idle", 100e3, 100e3, 2400, 210, 8, 0, cfg, 400, 93, 0.30);
   scenario("80 kS/s (nominal)", 80e3, 80e3, 2400, 210, 15, 0, cfg, 400, 100);
   scenario("sampler clock +4% off nominal", 104e3, 100e3, 2400, 210, 15, 0, cfg, 400, 100);
   scenario("sampler clock -4% off nominal", 96e3, 100e3, 2400, 210, 15, 0, cfg, 400, 100);

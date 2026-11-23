@@ -53,6 +53,7 @@ struct DipDetectorConfig {
   float min_threshold{20.0f};   // floor for the threshold (counts)
   float fixed_threshold{0.0f};  // > 0: use this threshold in counts and disable auto tracking
   bool auto_depth{true};        // track dip depth and set threshold = frac * depth
+  uint32_t exit_samples{3};     // consecutive samples above the exit level that end a dip (bridges ADC dropouts)
   uint32_t min_width{2};        // dips narrower than this many samples are noise
   uint32_t max_width{300};      // wider than this = bus level step, re-learn baseline
   float baseline_alpha_fast{1.0f / 64};
@@ -99,6 +100,7 @@ class DipDetector {
   uint32_t holdoff_{0};
   uint64_t dips_{0}, rejected_{0};
   bool learn_{true};
+  uint32_t above_run_{0}, last_low_len_{0};
   uint32_t half_count_{0};  // samples of the current dip below baseline - 1 x threshold (~half depth)
   float width_{0};
 };

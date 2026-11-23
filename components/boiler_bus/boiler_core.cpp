@@ -69,6 +69,7 @@ float DipDetector::threshold_now() const {
 
 void DipDetector::reset_state() {
   in_dip_ = false;
+  above_run_ = 0;
   half_count_ = 0;
   init_ = false;
   holdoff_ = 0;
@@ -91,6 +92,8 @@ bool DipDetector::push(uint16_t xi, Dip *dip) {
       dip_len_ = 1;
       dip_sum_ = x;  // here: running minimum
       half_count_ = 1;
+      above_run_ = 0;
+      last_low_len_ = 1;
       return false;
     }
     if (holdoff_) {
@@ -101,9 +104,13 @@ bool DipDetector::push(uint16_t xi, Dip *dip) {
     }
     return false;
   }
-  // in a dip: stay while below the (hysteresis) exit level
+  // in a dip: stay while below the (hysteresis) exit level. The ADC sometimes reads the idle level for a sample
+  // or two in the middle of a dip, so a dip only ends after exit_samples consecutive samples above the exit level;
+  // the dip start (which is all the bit timing uses) is unaffected.
   if (x < baseline_ - 0.5f * thr) {
-    dip_len_++;
+    dip_len_ += above_run_ + 1;  // a notch counts as part of the dip
+    above_run_ = 0;
+    last_low_len_ = dip_len_;
     if (x < baseline_ - thr) half_count_++;
     if (x < dip_sum_) dip_sum_ = x;
     if (dip_len_ > cfg_.max_width) {  // the bus level moved, not a data dip
@@ -113,13 +120,17 @@ bool DipDetector::push(uint16_t xi, Dip *dip) {
     }
     return false;
   }
+  if (++above_run_ < cfg_.exit_samples) return false;
   in_dip_ = false;
-  holdoff_ = 2;  // the rising edge samples must not drag the baseline
-  if (dip_len_ < cfg_.min_width) {
+  above_run_ = 0;
+  holdoff_ = 0;
+  dip_len_ = last_low_len_;
+  const float d = baseline_ - dip_sum_;
+  // a 1-sample dip is normally noise, but a full-depth one is a real dip whose other samples read idle (ADC dropout)
+  if (dip_len_ < cfg_.min_width && !(d >= 0.8f * (depth_ > 0 ? depth_ : cfg_.nominal_depth))) {
     rejected_++;
     return false;
   }
-  const float d = baseline_ - dip_sum_;
   if (learn_) {
     if (cfg_.auto_depth && d > 0.5f * cfg_.nominal_depth && d < 2.0f * cfg_.nominal_depth) depth_ += (d - depth_) / 32.0f;
     width_ += (float(half_count_) - width_) * (width_ > 0 ? 1.0f / 256 : 1.0f);
