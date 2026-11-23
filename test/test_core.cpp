@@ -249,6 +249,138 @@ static void test_waveforms() {
   }
 }
 
+
+// ---- 4. transmit helpers ----------------------------------------------------------
+// Turn a pulse list into the dip start sample indices a 100 kS/s sampler would report (10 us per sample).
+static std::vector<uint64_t> pulse_dip_starts(const std::vector<TxPulse> &p, uint64_t t0 = 5000) {
+  std::vector<uint64_t> v;
+  uint64_t t = t0;
+  for (auto &x : p) {
+    v.push_back(t);
+    t += (x.high_us + x.low_us) / 10;
+  }
+  return v;
+}
+
+static void test_tx() {
+  // encode_frame reproduces every captured frame bit for bit
+  int checked = 0;
+  for (auto &b : g_sample_frames) {
+    Frame f;
+    if (parse_bit_string(b, &f) != ParseStatus::OK) continue;
+    uint8_t bytes[FRAME_BYTES];
+    encode_frame(f, bytes);
+    std::string bits;
+    for (size_t i = 0; i < FRAME_BITS; i++) bits += ((bytes[i / 8] >> (i % 8)) & 1) ? '1' : '0';
+    CHECK(bits == b, "re-encode mismatch");
+    checked++;
+  }
+  CHECK(checked > 100, "re-encoded %d frames", checked);
+
+  // read request for 0033: exact bytes, CRC valid, decodes back
+  Frame rq = make_read_request(0x0033);
+  uint8_t by[FRAME_BYTES];
+  encode_frame(rq, by);
+  CHECK(by[0] == '\r' && by[1] == 0xA1 && by[2] == 0x51 && by[3] == 0x10 && by[4] == 0x11 && by[17] == '\n', "request header");
+  CHECK(memcmp(by + 5, "00330000", 8) == 0, "request reg/val ascii");
+  CHECK(crc16_xmodem(by + 1, 12) == (uint16_t) strtoul(std::string((char *) by + 13, 4).c_str(), nullptr, 16), "request crc");
+
+  // the pulses, fed through the real decoder, give the frame back; periods are exactly 160 / 320 us
+  auto pulses = tx_frame_pulses(by, TX_DIP_US_DEFAULT);
+  CHECK(pulses.size() == FRAME_BITS + 1, "145 dips");
+  CHECK(tx_pulses_safe(pulses), "request pulses safe");
+  BurstDecoder bd(100e3f);
+  BurstResult br{};
+  for (uint64_t s : pulse_dip_starts(pulses)) CHECK(!bd.on_dip(s, &br), "no early finish");
+  CHECK(bd.on_idle(5000 + 100000, &br) && br.status == ParseStatus::OK, "request decodes");
+  CHECK(br.frame.reg == 0x0033 && br.frame.from_display() && br.frame.is_request() && br.frame.sub == 0x11 && br.frame.val == 0, "decoded request");
+  CHECK(br.ndips == FRAME_BITS + 1, "ndips");
+  printf("  request 0033: %zu dips, %.2f ms on the bus, longest HIGH %u us\n", pulses.size(), tx_pulses_total_us(pulses) / 1000.0, (unsigned) TX_DIP_US_DEFAULT);
+
+  // every possible register: safe, bounded, shorter than the display->board quiet gap budget (<= 40 ms; gap after a board frame is >= 43.9 ms)
+  uint32_t worst = 0;
+  for (uint32_t r = 0; r <= 0xFFFF; r += 1) {
+    uint8_t b2[FRAME_BYTES];
+    encode_frame(make_read_request((uint16_t) r), b2);
+    auto p = tx_frame_pulses(b2, TX_DIP_US_MAX);
+    if (!tx_pulses_safe(p)) { CHECK(false, "unsafe for reg %04X", r); break; }
+    worst = std::max(worst, tx_pulses_total_us(p));
+  }
+  printf("  longest request over all 65536 registers: %.2f ms\n", worst / 1000.0);
+  CHECK(worst < 36000, "worst request %u us", worst);
+
+  // test pattern: 8 dips at 160 us, 40 us wide, never HIGH longer than the cap
+  auto pat = tx_test_pattern(8, 40);
+  CHECK(pat.size() == 8 && tx_pulses_safe(pat), "pattern");
+  auto st = pulse_dip_starts(pat, 0);
+  bool spacing = true;
+  for (size_t i = 1; i < st.size(); i++) spacing &= (st[i] - st[i - 1] == 16);
+  CHECK(spacing, "pattern spacing 160 us");
+  uint32_t max_high = 0;
+  for (auto &x : pat) max_high = std::max<uint32_t>(max_high, x.high_us);
+  CHECK(max_high == 40, "pattern high");
+  CHECK(tx_pulses_total_us(pat) == 7 * 160 + 40 + TX_TAIL_LOW_US, "pattern total %u", tx_pulses_total_us(pat));
+  // a pattern burst is not a frame: the decoder calls it a bad length (so the component must keep it away from the counters)
+  BurstDecoder bd2(100e3f);
+  for (uint64_t s : st) bd2.on_dip(s + 1000, &br);
+  CHECK(bd2.on_idle(1000 + 100000, &br) && br.status == ParseStatus::BAD_LENGTH && br.ndips == 8, "pattern is not a frame");
+
+  // the HIGH time can never exceed the caps, whatever the user asks for
+  CHECK(clamp_tx_dip_us(40) == 40 && clamp_tx_dip_us(0) == TX_DIP_US_MIN && clamp_tx_dip_us(5000) == TX_DIP_US_MAX, "clamp");
+  CHECK(clamp_tx_dip_us(NAN) == TX_DIP_US_DEFAULT && clamp_tx_dip_us(-3) == TX_DIP_US_MIN, "clamp nan/neg");
+  CHECK(TX_DIP_US_MAX <= TX_MAX_HIGH_US && TX_MAX_HIGH_US <= 500, "caps");
+  for (uint32_t d : {0u, 1u, 40u, 139u, 140u, 141u, 500u, 100000u}) {
+    CHECK(tx_pulses_safe(tx_test_pattern(32, d)), "pattern safe for dip %u", d);
+    uint8_t b3[FRAME_BYTES];
+    encode_frame(make_read_request(0xFFFF), b3);
+    CHECK(tx_pulses_safe(tx_frame_pulses(b3, d)), "frame safe for dip %u", d);
+  }
+  CHECK(!tx_pulses_safe({{600, 100}}), "600 us HIGH rejected");
+  CHECK(!tx_pulses_safe({{40, 0}}), "zero LOW rejected");
+  CHECK(!tx_pulses_safe({}), "empty rejected");
+  CHECK(!tx_pulses_safe(std::vector<TxPulse>(300, TxPulse{40, 280})), "too long rejected");
+
+  uint16_t reg = 0;
+  CHECK(parse_hex_reg("0033", &reg) && reg == 0x33 && parse_hex_reg("abCD", &reg) && reg == 0xABCD, "hex reg");
+  CHECK(!parse_hex_reg("033", &reg) && !parse_hex_reg("00G3", &reg) && !parse_hex_reg("00330", &reg) && !parse_hex_reg("", &reg), "hex reg bad");
+}
+
+// ---- 5. dip width / learn flag / burst gap ------------------------------------------
+static void test_detector_extras() {
+  Wave w; w.rate = 100e3; w.base = 2400; w.depth = 210; w.noise = 6;
+  std::string bits(60, '0');
+  w.add_idle(0.05); w.add_burst(bits, 0); w.add_idle(0.05); w.add_burst(bits, 0); w.add_idle(0.05); w.render();
+  DipDetector dd;
+  for (auto v : w.s) { Dip d; dd.push(v, &d); }
+  float wd = dd.width() * 10.0f;
+  printf("  40 us dips seen by the 10 us sampler: width at half depth %.1f us, depth %.0f counts\n", wd, dd.depth());
+  CHECK(wd > 25 && wd < 55, "width %.1f us", wd);
+
+  // learn off: same dips, learned depth/width do not move
+  DipDetector d2;
+  for (size_t i = 0; i < 5000; i++) { Dip d; d2.push(w.s[i], &d); }
+  float depth0 = d2.depth(), width0 = d2.width();
+  d2.set_learn(false);
+  Wave w2; w2.rate = 100e3; w2.base = 2400; w2.depth = 90; w2.noise = 6;  // much shallower dips, like an untuned VR1
+  w2.add_burst(std::string(10, '0'), 0); w2.add_idle(0.02); w2.render();
+  int n = 0;
+  d2.reset_state();
+  for (auto v : w2.s) { Dip d; if (d2.push(v, &d)) { n++; CHECK(d.depth > 0, "dip depth reported"); } }
+  CHECK(d2.depth() == depth0 && d2.width() == width0, "learn off keeps depth/width");
+
+  // burst gap is reported in samples
+  BurstDecoder bd(100e3f);
+  BurstResult br{};
+  std::vector<BurstResult> got;
+  for (int b = 0; b < 3; b++)
+    for (int i = 0; i < 20; i++) if (bd.on_dip(10000 + b * 20000 + i * 16, &br)) got.push_back(br);
+  if (bd.on_idle(1000000, &br)) got.push_back(br);
+  CHECK(got.size() == 3, "3 bursts");
+  if (got.size() == 3) CHECK(got[1].gap_samples == 20000 - 19 * 16 && got[2].gap_samples == 20000 - 19 * 16, "gap %llu", (unsigned long long) got[1].gap_samples);
+  CHECK(bd.last_dip_index() == 10000 + 2 * 20000 + 19 * 16 && bd.seen_dip(), "last dip index kept after finish");
+  (void) n;
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) { fprintf(stderr, "usage: %s frames.log...\n", argv[0]); return 2; }
   printf("[1] captured frames\n");
@@ -257,6 +389,10 @@ int main(int argc, char **argv) {
   test_units();
   printf("[3] synthetic ADC waveforms\n");
   test_waveforms();
+  printf("[4] transmit helpers\n");
+  test_tx();
+  printf("[5] dip width, learn flag, burst gap\n");
+  test_detector_extras();
   printf("\nASSERTIONS: %d passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }

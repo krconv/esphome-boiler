@@ -96,6 +96,14 @@ SENSORS = {
     "dip_depth": _s("mV", 0, None, MEAS, None, CAT),
     "bit_period": _s("µs", 0, None, MEAS, "mdi:timer-outline", CAT),
     "last_frame_age": _s(UNIT_SECOND, 0, DEVICE_CLASS_DURATION, MEAS, None, CAT),
+    # malformed-burst breakdown: bursts that decode to fewer / more than 144 bits (the rest are bad framing bytes)
+    "malformed_short": _s(None, 0, None, INC, None, CAT),
+    "malformed_long": _s(None, 0, None, INC, None, CAT),
+    "dip_width": _s("µs", 1, None, MEAS, "mdi:timer-outline", CAT),  # display dips, width at half depth (10 us sampler)
+    "rejected_dips": _s(None, 0, None, INC, None, CAT),  # dips thrown away as too narrow / too wide
+    # transmit test: depth of the dips we generate (mV at the ADC, and the equivalent on the bus)
+    "tx_dip_depth": _s("mV", 0, None, MEAS, "mdi:flash", CAT),
+    "tx_dip_depth_bus": _s(UNIT_VOLT, 2, DEVICE_CLASS_VOLTAGE, MEAS, "mdi:flash", CAT),
 }
 
 BINARY_SENSORS = {
@@ -111,12 +119,14 @@ TEXT_SENSORS = {
     "state": dict(icon="mdi:state-machine"),
     "status_raw": dict(entity_category=CAT),
     "error_history": dict(icon="mdi:alert-circle-outline"),
+    "tx_last_result": dict(icon="mdi:send-check", entity_category=CAT),
+    "malformed_info": dict(icon="mdi:bug-outline", entity_category=CAT),  # latest malformed burst, at most 1 per second
 }
 
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(BoilerBus),
-        # GPIO32: NPN that pulls the bus down. Held LOW; this firmware never transmits.
+        # GPIO32: NPN that pulls the bus down. LOW unless a transmit test runs (set_tx_test_enabled / tx_read_register).
         cv.Required(CONF_TX_PIN): pins.internal_gpio_output_pin_number,
         # ADC1 pin (GPIO32-39) behind the divider.
         cv.Required(CONF_ADC_PIN): pins.internal_gpio_input_pin_number,
@@ -140,6 +150,7 @@ CONFIG_SCHEMA = cv.Schema(
 
 async def to_code(config):
     include_builtin_idf_component("esp_adc")  # adc_continuous (DMA) driver
+    include_builtin_idf_component("esp_driver_rmt")  # transmit tests: hardware-timed dips on GPIO32
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 

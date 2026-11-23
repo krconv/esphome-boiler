@@ -63,6 +63,7 @@ struct DipDetectorConfig {
 struct Dip {
   uint64_t start;  // sample index of the first sample below threshold
   uint32_t width;  // samples
+  float depth;     // counts: baseline minus the lowest sample
 };
 
 class DipDetector {
@@ -77,7 +78,12 @@ class DipDetector {
   float threshold() const { return threshold_now(); }
   uint64_t dips() const { return dips_; }
   uint64_t rejected() const { return rejected_; }  // too narrow / too wide
+  bool in_dip() const { return in_dip_; }
   void reset_state();                              // after sample loss
+  // false: dips still come out, but do not move the learned depth / width (used while we transmit ourselves)
+  void set_learn(bool v) { learn_ = v; }
+  // EMA of the dip width in samples, measured at half depth (0 until a dip was seen)
+  float width() const { return width_; }
 
  private:
   float threshold_now() const;
@@ -92,6 +98,9 @@ class DipDetector {
   float dip_sum_{0};
   uint32_t holdoff_{0};
   uint64_t dips_{0}, rejected_{0};
+  bool learn_{true};
+  uint32_t half_count_{0};  // samples of the current dip below baseline - 1 x threshold (~half depth)
+  float width_{0};
 };
 
 // ---- dips -> bursts -> frames ---------------------------------------------
@@ -100,6 +109,9 @@ struct BurstResult {
   Frame frame;
   size_t nbits;
   uint64_t start_sample;
+  size_t ndips;            // dips in the burst
+  uint64_t gap_samples;    // quiet time between the previous burst's last dip and this burst's first dip
+  char bits[FRAME_BITS + 17];  // the decoded bits as '0'/'1' (truncated), NUL-terminated; for diagnostics
 };
 
 class BurstDecoder {
@@ -112,12 +124,16 @@ class BurstDecoder {
   void abort() { bits_.clear(); have_last_ = false; }  // sample loss
   float zero_period_us() const { return zero_period_us_; }  // EMA of bit-0 periods: shows real sample-clock error
   float one_period_us() const { return one_period_us_; }
+  uint64_t last_dip_index() const { return last_dip_; }  // most recent dip start, kept after a burst finishes
+  bool seen_dip() const { return seen_dip_; }
 
  private:
   void finish(BurstResult *res);
   float us_per_sample_;
   bool have_last_{false};
   uint64_t last_{0}, first_{0};
+  uint64_t last_dip_{0}, prev_burst_end_{0};
+  bool seen_dip_{false}, have_prev_{false};
   std::vector<uint8_t> bits_;
   size_t dips_in_burst_{0};
   float zero_period_us_{0}, one_period_us_{0};
@@ -188,5 +204,35 @@ constexpr float GAS_RPM_HI = 6300.0f, GAS_BTU_HI = 199000.0f;
 constexpr float PROPANE_BTU_PER_GAL = 91500.0f;
 float gas_btu_per_hour(float rpm);  // linear, clamped to the calibrated range
 inline float propane_gal_per_hour(float btu_h) { return btu_h / PROPANE_BTU_PER_GAL; }
+
+// ---- transmit (GPIO32 -> NPN -> bus) ------------------------------------------------
+// Each pulse is one dip: pin HIGH for high_us (bus pulled down), then LOW for low_us. The pin is LOW whenever a
+// pulse list is not running, and no pulse list may hold it HIGH longer than TX_MAX_HIGH_US.
+constexpr uint32_t TX_MAX_HIGH_US = 500;       // hard ceiling, enforced by tx_pulses_safe()
+constexpr uint32_t TX_BIT0_PERIOD_US = 160;    // dip-to-dip, display's bit 0
+constexpr uint32_t TX_BIT1_PERIOD_US = 320;    // dip-to-dip, display's bit 1
+constexpr uint32_t TX_MIN_LOW_US = 20;         // keeps the dips distinct and the pin low between them
+constexpr uint32_t TX_DIP_US_DEFAULT = 40;     // display dip width (boiler_sniff.py: "fixed ~40 us dips")
+constexpr uint32_t TX_DIP_US_MIN = 10;
+constexpr uint32_t TX_DIP_US_MAX = TX_BIT0_PERIOD_US - TX_MIN_LOW_US;  // 140: stricter than TX_MAX_HIGH_US
+constexpr uint32_t TX_TAIL_LOW_US = 100;       // pin LOW after the last dip
+constexpr uint32_t TX_MAX_TOTAL_US = 40000;    // longest pulse list we will ever send (a frame is ~31 ms)
+
+struct TxPulse {
+  uint16_t high_us;
+  uint16_t low_us;
+};
+
+uint32_t clamp_tx_dip_us(float us);  // into [TX_DIP_US_MIN, TX_DIP_US_MAX]; NaN -> default
+// n dips, bit-0 spacing (a short non-frame burst)
+std::vector<TxPulse> tx_test_pattern(uint32_t n_dips, uint32_t dip_us);
+// 18 raw frame bytes (\r addr addr type sub REG VAL CRC \n) with the CRC filled in
+void encode_frame(const Frame &f, uint8_t out[FRAME_BYTES]);
+Frame make_read_request(uint16_t reg);  // A1 51, type 0x10, sub 0x11, value 0000
+// bits LSB-first per byte; first dip is the burst start, every following dip is one bit (160 us = 0, 320 us = 1)
+std::vector<TxPulse> tx_frame_pulses(const uint8_t bytes[FRAME_BYTES], uint32_t dip_us);
+uint32_t tx_pulses_total_us(const std::vector<TxPulse> &p);
+bool tx_pulses_safe(const std::vector<TxPulse> &p);  // every HIGH <= TX_MAX_HIGH_US, every LOW >= TX_MIN_LOW_US, bounded total
+bool parse_hex_reg(const std::string &s, uint16_t *out);  // exactly 4 hex digits
 
 }  // namespace boiler

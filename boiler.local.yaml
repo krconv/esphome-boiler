@@ -1,6 +1,6 @@
 # Boiler display-bus sniffer: Olimex ESP32-POE (non-ISO) -> Home Assistant
 # Passive: listens to the boiler's 2-wire display link through a 50k/10k divider on GPIO35.
-# GPIO32 (TX, NPN to the bus) is held LOW in firmware and never transmitted on.
+# GPIO32 (TX, NPN to the bus) is held LOW; it only pulses for the TX test switch / read-register button.
 #
 # Local-checkout variant of boiler.yaml: the component comes from ./components instead of git.
 # Build: esphome compile boiler.local.yaml (needs secrets.yaml with boiler_api_key, boiler_ota_password).
@@ -10,17 +10,23 @@ esphome:
   friendly_name: Boiler
 
 esp32:
-  board: esp32-poe
+  variant: esp32
+  flash_size: 4MB
   framework:
     type: esp-idf
 
+# Olimex ESP32-POE (non-ISO): LAN8720, RMII clock out on GPIO17, PHY power on GPIO12
 ethernet:
   type: LAN8720
   mdc_pin: GPIO23
   mdio_pin: GPIO18
-  clk_mode: GPIO17_OUT
+  clk:
+    mode: CLK_OUT
+    pin: GPIO17
   phy_addr: 0
-  power_pin: GPIO12
+  power_pin:
+    number: GPIO12
+    ignore_strapping_warning: true
 
 logger:
   level: INFO
@@ -64,7 +70,7 @@ one_wire:
 boiler_bus:
   id: boiler_bus_hub
   adc_pin: GPIO35          # ADC1_CH7, 12 dB attenuation, continuous DMA sampling
-  tx_pin: GPIO32           # held LOW, never used to transmit
+  tx_pin: GPIO32           # LOW unless a transmit test runs (RMT, HIGH <= 140 us per dip)
   sample_rate: 100000      # samples/s
   dip_depth_mv: 170        # expected dip depth at the ADC pin
   dip_threshold_mv: 85     # ~half the depth; with auto_threshold it tracks 0.5 x measured depth
@@ -164,5 +170,94 @@ boiler_bus:
     name: "Bus Bit-0 Period"
   last_frame_age:
     name: "Last Frame Age"
+  malformed_short:
+    name: "Bus Malformed Short"
+  malformed_long:
+    name: "Bus Malformed Long"
+  malformed_info:
+    name: "Bus Malformed Burst Info"
+  dip_width:
+    name: "ADC Dip Width"
+  rejected_dips:
+    name: "ADC Rejected Dips"
   bus_active:
     name: "Bus Active"
+
+  # transmit test (see the switch / number / button / text below)
+  tx_dip_depth:
+    name: "TX Dip Depth"
+  tx_dip_depth_bus:
+    name: "TX Dip Depth Bus"
+  tx_last_result:
+    name: "TX Last Result"
+
+# ---- Transmit test controls (GPIO32 is LOW unless one of these runs) -------------------------------
+# TX Test Pattern: once a second, 2-8 ms into a quiet gap, TX Test Dip Count dips of TX Dip Width us at the
+# display's bit-0 spacing (160 us). Not a frame. Always OFF after a reboot.
+# TX Read Register: one properly encoded read request for TX Register, in a ~44 ms gap after a board reply.
+switch:
+  - platform: template
+    name: "TX Test Pattern"
+    id: tx_test_pattern
+    icon: mdi:flash
+    entity_category: config
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lambda: id(boiler_bus_hub).set_tx_test_enabled(true);
+    turn_off_action:
+      - lambda: id(boiler_bus_hub).set_tx_test_enabled(false);
+
+number:
+  - platform: template
+    name: "TX Dip Width"
+    id: tx_dip_us
+    icon: mdi:timer-outline
+    entity_category: config
+    unit_of_measurement: "µs"
+    mode: box
+    min_value: 10
+    max_value: 140       # firmware clamps here too (bit-0 period 160 us minus 20 us)
+    step: 1
+    initial_value: 40    # display dip width
+    restore_value: true
+    optimistic: true
+    on_value:
+      - lambda: id(boiler_bus_hub).set_tx_dip_us(x);
+  - platform: template
+    name: "TX Test Dip Count"
+    id: tx_dip_count
+    entity_category: config
+    mode: box
+    min_value: 1
+    max_value: 16
+    step: 1
+    initial_value: 8
+    restore_value: true
+    optimistic: true
+    on_value:
+      - lambda: id(boiler_bus_hub).set_tx_dip_count(x);
+
+text:
+  - platform: template
+    name: "TX Register"
+    id: tx_register
+    icon: mdi:identifier
+    entity_category: config
+    mode: text
+    min_length: 4
+    max_length: 4
+    pattern: "[0-9A-Fa-f]{4}"
+    initial_value: "0033"
+    restore_value: true
+    optimistic: true
+    on_value:
+      - lambda: id(boiler_bus_hub).set_tx_register(x);
+
+button:
+  - platform: template
+    name: "TX Read Register"
+    icon: mdi:send
+    entity_category: config
+    on_press:
+      - lambda: id(boiler_bus_hub).tx_read_register();

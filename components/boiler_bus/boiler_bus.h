@@ -12,6 +12,9 @@
 
 #include "boiler_core.h"
 
+#include <vector>
+
+#include "driver/rmt_tx.h"
 #include "esp_adc/adc_continuous.h"
 #include "esp_adc/adc_cali.h"
 #include "freertos/FreeRTOS.h"
@@ -29,9 +32,10 @@ namespace boiler_bus {
   X(flow) X(fan_rpm) X(water_pressure) X(flame_sensor) \
   X(gas_btu_h) X(propane_gal_h) X(propane_total) \
   X(frames_per_second) X(frames_ok) X(crc_errors) X(malformed_frames) X(unknown_frames) X(adc_overruns) \
-  X(adc_baseline) X(dip_depth) X(bit_period) X(last_frame_age)
+  X(adc_baseline) X(dip_depth) X(bit_period) X(last_frame_age) \
+  X(malformed_short) X(malformed_long) X(dip_width) X(rejected_dips) X(tx_dip_depth) X(tx_dip_depth_bus)
 #define BOILER_BINARY_SENSORS(X) X(pump) X(ch_demand) X(spark) X(flame) X(dhw_demand) X(bus_active)
-#define BOILER_TEXT_SENSORS(X) X(state) X(status_raw) X(error_history)
+#define BOILER_TEXT_SENSORS(X) X(state) X(status_raw) X(error_history) X(tx_last_result) X(malformed_info)
 
 class BoilerBus : public Component {
  public:
@@ -55,6 +59,14 @@ class BoilerBus : public Component {
   void set_fan_stale_ms(uint32_t v) { this->fan_stale_ms_ = v; }
   void set_log_frames(bool v) { this->log_frames_ = v; }
 
+  // ---- transmit test controls (called from HA entities, main loop) ----
+  // GPIO32 only ever goes HIGH inside a pulse list that boiler::tx_pulses_safe() accepted.
+  void set_tx_test_enabled(bool on) { this->tx_test_on_.store(on); }
+  void set_tx_dip_us(float us) { this->tx_dip_us_.store(boiler::clamp_tx_dip_us(us)); }
+  void set_tx_dip_count(float n) { this->tx_dip_count_.store(n < 1 ? 1 : (n > 32 ? 32 : (uint32_t) n)); }
+  bool set_tx_register(const std::string &hex);  // false if not 4 hex digits
+  void tx_read_register();                       // one read request, only in a safe gap, at most once per second
+
   void setup() override;
   void loop() override;
   void dump_config() override;
@@ -63,9 +75,14 @@ class BoilerBus : public Component {
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
  protected:
+  enum class Kind : uint8_t { FRAME, MALFORMED, TX_DEPTH, TX_SENT };
   struct QItem {
     boiler::Frame frame;
     uint32_t t_ms;
+    Kind kind{Kind::FRAME};
+    float depth_mv{0};
+    uint32_t found{0}, expected{0};
+    char info[232];
   };
 
   void drive_tx_low_();
@@ -73,6 +90,16 @@ class BoilerBus : public Component {
   static void task_trampoline_(void *arg);
   void sampler_loop_();
   void handle_burst_(const boiler::BurstResult &br);
+  void enqueue_(const QItem &it);
+  bool tx_init_();
+  void tx_service_(bool drained);
+  bool tx_fire_(const std::vector<boiler::TxPulse> &p, bool is_frame, uint32_t expect_dips);
+  void tx_probe_push_(uint64_t idx, uint16_t x);
+  void tx_finish_();
+  void on_tx_event_(const QItem &it);
+  void req_tick_(uint32_t now);
+  void req_on_frame_(const boiler::Frame &f, uint32_t t_ms);
+  void req_result_(const char *fmt, ...) __attribute__((format(printf, 2, 3)));
   void process_frame_(const QItem &it);
   void on_register_(uint16_t reg, uint16_t val, uint32_t now);
   void publish_counter_(uint16_t hi_reg, uint16_t lo_reg, sensor::Sensor *s);
@@ -99,7 +126,38 @@ class BoilerBus : public Component {
   boiler::BurstDecoder *bursts_{nullptr};
   std::atomic<bool> overflow_{false};
   std::atomic<uint32_t> overruns_{0}, crc_errors_{0}, malformed_{0}, queue_drops_{0};
-  std::atomic<float> baseline_counts_{0}, depth_counts_{0}, zero_period_us_{0};
+  std::atomic<float> baseline_counts_{0}, depth_counts_{0}, zero_period_us_{0}, width_samples_{0};
+  std::atomic<uint32_t> malformed_short_{0}, malformed_long_{0}, rejected_dips_{0}, malformed_info_drops_{0};
+  int64_t last_info_us_{0};
+
+  // transmit side. Shared with the main loop: the atomics. Everything else is sampler-task only.
+  std::atomic<bool> tx_test_on_{false}, tx_req_pending_{false};
+  std::atomic<uint32_t> tx_dip_us_{boiler::TX_DIP_US_DEFAULT}, tx_dip_count_{8};
+  std::atomic<uint16_t> tx_req_reg_{0x0033};
+  rmt_channel_handle_t tx_chan_{nullptr};
+  rmt_encoder_handle_t tx_enc_{nullptr};
+  bool tx_ok_{false}, tx_active_{false}, tx_is_frame_{false}, tx_swallow_{false};
+  std::vector<rmt_symbol_word_t> tx_syms_;
+  int64_t last_tx_us_{-10000000}, last_test_us_{-10000000}, tx_end_us_{0};
+  uint64_t tx_fire_idx_{0}, tx_win_end_{0};
+  uint32_t tx_expect_{0};
+  float tx_base_{0};
+  bool tx_in_{false};
+  float tx_min_{0};
+  uint32_t tx_len_{0};
+  std::vector<float> tx_depths_;
+  bool last_burst_board_{false};
+  float us_per_sample_{10.0f};
+  uint32_t test_bursts_{0};
+
+  // request tracking (main loop)
+  enum class Req : uint8_t { IDLE, WAIT_SLOT, SENT, WAIT_RESP };
+  Req req_{Req::IDLE};
+  uint16_t req_reg_{0};
+  uint32_t req_press_ms_{0}, req_sent_ms_{0}, req_t0_{0}, req_disp_seen_{0}, req_board_seen_{0};
+  uint32_t last_press_ms_{0};
+  bool any_press_{false};
+  bool req_display_between_{false};
   static bool IRAM_ATTR on_pool_ovf_(adc_continuous_handle_t, const adc_continuous_evt_data_t *, void *user);
 
   // main-loop side

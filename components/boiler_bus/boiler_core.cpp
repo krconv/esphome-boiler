@@ -69,6 +69,7 @@ float DipDetector::threshold_now() const {
 
 void DipDetector::reset_state() {
   in_dip_ = false;
+  half_count_ = 0;
   init_ = false;
   holdoff_ = 0;
 }
@@ -89,6 +90,7 @@ bool DipDetector::push(uint16_t xi, Dip *dip) {
       dip_start_ = idx;
       dip_len_ = 1;
       dip_sum_ = x;  // here: running minimum
+      half_count_ = 1;
       return false;
     }
     if (holdoff_) {
@@ -102,6 +104,7 @@ bool DipDetector::push(uint16_t xi, Dip *dip) {
   // in a dip: stay while below the (hysteresis) exit level
   if (x < baseline_ - 0.5f * thr) {
     dip_len_++;
+    if (x < baseline_ - thr) half_count_++;
     if (x < dip_sum_) dip_sum_ = x;
     if (dip_len_ > cfg_.max_width) {  // the bus level moved, not a data dip
       in_dip_ = false;
@@ -117,11 +120,15 @@ bool DipDetector::push(uint16_t xi, Dip *dip) {
     return false;
   }
   const float d = baseline_ - dip_sum_;
-  if (cfg_.auto_depth && d > 0.5f * cfg_.nominal_depth && d < 2.0f * cfg_.nominal_depth) depth_ += (d - depth_) / 32.0f;
+  if (learn_) {
+    if (cfg_.auto_depth && d > 0.5f * cfg_.nominal_depth && d < 2.0f * cfg_.nominal_depth) depth_ += (d - depth_) / 32.0f;
+    width_ += (float(half_count_) - width_) * (width_ > 0 ? 1.0f / 256 : 1.0f);
+  }
   dips_++;
   if (dip) {
     dip->start = dip_start_;
     dip->width = dip_len_;
+    dip->depth = d;
   }
   return true;
 }
@@ -131,8 +138,17 @@ void BurstDecoder::finish(BurstResult *res) {
   if (res) {
     res->start_sample = first_;
     res->nbits = bits_.size();
+    res->ndips = dips_in_burst_;
+    {
+      const size_t n = std::min(bits_.size(), sizeof(res->bits) - 1);
+      for (size_t i = 0; i < n; i++) res->bits[i] = bits_[i] ? '1' : '0';
+      res->bits[n] = 0;
+    }
+    res->gap_samples = have_prev_ ? first_ - prev_burst_end_ : 0;
     res->status = dips_in_burst_ < MIN_BURST_DIPS ? ParseStatus::NOISE : parse_bits(bits_.data(), bits_.size(), &res->frame);
   }
+  prev_burst_end_ = last_;
+  have_prev_ = true;
   bits_.clear();
   have_last_ = false;
   dips_in_burst_ = 0;
@@ -158,6 +174,8 @@ bool BurstDecoder::on_dip(uint64_t idx, BurstResult *res) {
   }
   have_last_ = true;
   last_ = idx;
+  last_dip_ = idx;
+  seen_dip_ = true;
   return finished;
 }
 
@@ -245,6 +263,89 @@ std::string format_error_history(const uint16_t *vals, const bool *seen) {
 float gas_btu_per_hour(float rpm) {
   float r = std::max(GAS_RPM_LO, std::min(rpm, GAS_RPM_HI));
   return GAS_BTU_LO + (r - GAS_RPM_LO) * (GAS_BTU_HI - GAS_BTU_LO) / (GAS_RPM_HI - GAS_RPM_LO);
+}
+
+// ---- transmit helpers ---------------------------------------------------------------
+uint32_t clamp_tx_dip_us(float us) {
+  if (!std::isfinite(us)) return TX_DIP_US_DEFAULT;
+  if (us < float(TX_DIP_US_MIN)) return TX_DIP_US_MIN;
+  if (us > float(TX_DIP_US_MAX)) return TX_DIP_US_MAX;
+  return uint32_t(us + 0.5f);
+}
+
+std::vector<TxPulse> tx_test_pattern(uint32_t n, uint32_t dip_us) {
+  dip_us = clamp_tx_dip_us(float(dip_us));
+  if (n < 1) n = 1;
+  if (n > 32) n = 32;
+  std::vector<TxPulse> p;
+  for (uint32_t i = 0; i < n; i++)
+    p.push_back({uint16_t(dip_us), uint16_t(i + 1 < n ? TX_BIT0_PERIOD_US - dip_us : TX_TAIL_LOW_US)});
+  return p;
+}
+
+static void put_hex4(uint8_t *p, uint16_t v) {
+  static const char H[] = "0123456789ABCDEF";
+  for (int i = 0; i < 4; i++) p[i] = (uint8_t) H[(v >> (12 - 4 * i)) & 0xF];
+}
+
+void encode_frame(const Frame &f, uint8_t out[FRAME_BYTES]) {
+  out[0] = '\r';
+  out[1] = f.addr1;
+  out[2] = f.addr2;
+  out[3] = f.type;
+  out[4] = f.sub;
+  put_hex4(out + 5, f.reg);
+  put_hex4(out + 9, f.val);
+  put_hex4(out + 13, crc16_xmodem(out + 1, 12));
+  out[17] = '\n';
+}
+
+Frame make_read_request(uint16_t reg) {
+  Frame f;
+  f.addr1 = 0xA1;
+  f.addr2 = 0x51;
+  f.type = 0x10;
+  f.sub = 0x11;
+  f.reg = reg;
+  f.val = 0;
+  return f;
+}
+
+std::vector<TxPulse> tx_frame_pulses(const uint8_t bytes[FRAME_BYTES], uint32_t dip_us) {
+  dip_us = clamp_tx_dip_us(float(dip_us));
+  std::vector<TxPulse> p;
+  // dip 0 starts the burst; dip k+1 follows bit k
+  for (size_t i = 0; i < FRAME_BITS; i++) {
+    const bool bit = (bytes[i / 8] >> (i % 8)) & 1;
+    p.push_back({uint16_t(dip_us), uint16_t((bit ? TX_BIT1_PERIOD_US : TX_BIT0_PERIOD_US) - dip_us)});
+  }
+  p.push_back({uint16_t(dip_us), uint16_t(TX_TAIL_LOW_US)});
+  return p;
+}
+
+uint32_t tx_pulses_total_us(const std::vector<TxPulse> &p) {
+  uint32_t t = 0;
+  for (auto &x : p) t += x.high_us + x.low_us;
+  return t;
+}
+
+bool tx_pulses_safe(const std::vector<TxPulse> &p) {
+  if (p.empty()) return false;
+  for (auto &x : p)
+    if (x.high_us == 0 || x.high_us > TX_MAX_HIGH_US || x.low_us < TX_MIN_LOW_US) return false;
+  return tx_pulses_total_us(p) <= TX_MAX_TOTAL_US;
+}
+
+bool parse_hex_reg(const std::string &s, uint16_t *out) {
+  if (s.size() != 4) return false;
+  uint16_t v = 0;
+  for (char c : s) {
+    int h = hexval((uint8_t) c);
+    if (h < 0) return false;
+    v = uint16_t((v << 4) | h);
+  }
+  *out = v;
+  return true;
 }
 
 }  // namespace boiler
