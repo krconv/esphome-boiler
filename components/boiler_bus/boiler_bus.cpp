@@ -22,6 +22,8 @@ static constexpr uint32_t SAVE_MS = 10 * 60 * 1000;
 static constexpr size_t ADC_FRAME_BYTES = 256;       // 1.28 ms of samples at 100 kS/s per DMA frame (keeps the TX idle check fresh)
 static constexpr size_t ADC_READ_BYTES = 1024;
 static constexpr size_t ADC_POOL_BYTES = 16384;
+static constexpr uint32_t RING_N = 8192;            // raw sample ring (power of two), 82 ms at 100 kS/s
+static constexpr size_t TRACE_SAMPLES = 248;
 
 // transmit guards (see boiler_core.h for the pulse limits)
 static constexpr int64_t TX_MIN_SPACING_US = 1000000;  // never more than one transmission per second
@@ -127,6 +129,7 @@ bool BoilerBus::start_adc_() {
   dc.min_width = 2;
   this->dips_ = new boiler::DipDetector(dc);
   this->bursts_ = new boiler::BurstDecoder((float) this->sample_rate_);
+  this->ring_ = (uint16_t *) calloc(RING_N, sizeof(uint16_t));
 
   adc_continuous_handle_cfg_t hc = {};
   hc.max_store_buf_size = ADC_POOL_BYTES;
@@ -157,7 +160,7 @@ bool BoilerBus::start_adc_() {
     ESP_LOGE(TAG, "adc_continuous_start failed");
     return false;
   }
-  if (xTaskCreatePinnedToCore(&BoilerBus::task_trampoline_, "boiler_adc", 8192, this, 5, &this->task_, 1) != pdPASS) {
+  if (xTaskCreatePinnedToCore(&BoilerBus::task_trampoline_, "boiler_adc", 12288, this, 5, &this->task_, 1) != pdPASS) {
     ESP_LOGE(TAG, "sampler task failed to start");
     return false;
   }
@@ -198,6 +201,7 @@ void BoilerBus::sampler_loop_() {
       uint16_t x = p->type1.data;
       boiler::Dip dip;
       boiler::BurstResult br;
+      if (this->ring_) this->ring_[this->dips_->index() & (RING_N - 1)] = x;
       if (this->tx_active_) this->tx_probe_push_(this->dips_->index(), x);
       if (this->dips_->push(x, &dip)) {
         // our own test-pattern dips are measured by the probe and must not look like a burst on the bus
@@ -230,6 +234,7 @@ void BoilerBus::handle_burst_(const boiler::BurstResult &br) {
   switch (br.status) {
     case ParseStatus::OK: {
       this->last_burst_board_ = !own && br.frame.from_board();
+      if (!own && esp_timer_get_time() - this->last_ok_trace_us_ > 10000000) this->queue_trace_(br, false, 20);
       QItem it{};
       it.frame = br.frame;
       it.t_ms = millis();
@@ -256,12 +261,40 @@ void BoilerBus::handle_burst_(const boiler::BurstResult &br) {
   }
   // diagnostics: at most one description per second (our own failures always)
   if (!own && now_us - this->last_info_us_ < 1000000) return;
-  if (!own) this->last_info_us_ = now_us;
+  if (!own) {
+    this->last_info_us_ = now_us;
+    this->queue_trace_(br, true, boiler::first_bad_bit(br.bits));
+  }
   QItem it{};
   it.kind = Kind::MALFORMED;
   it.t_ms = millis();
   snprintf(it.info, sizeof(it.info), "%s%s n=%u dips=%u gap=%.1fms %s", own ? "OWN " : "", label, (unsigned) br.nbits,
            (unsigned) br.ndips, br.gap_samples * this->us_per_sample_ / 1000.0f, br.bits);
+  this->enqueue_(it);
+}
+
+// Raw ADC samples around the first damaged byte (bad) or from inside a good frame, as hex digits.
+void BoilerBus::queue_trace_(const boiler::BurstResult &br, bool bad, int bitpos) {
+  if (!this->ring_ || br.ndips == 0) return;
+  size_t k;
+  if (bad) {
+    k = bitpos >= 0 ? (size_t) bitpos : (br.ndips > 14 ? br.ndips - 14 : 0);
+  } else {
+    this->last_ok_trace_us_ = esp_timer_get_time();
+    k = 20;
+  }
+  if (k >= br.ndips) k = br.ndips - 1;
+  if (k >= boiler::MAX_TRACK_DIPS) k = boiler::MAX_TRACK_DIPS - 1;
+  const uint64_t at = br.start_sample + br.dip_off[k];
+  const uint64_t from = at > 30 ? at - 30 : 0;
+  const uint64_t now_idx = this->dips_->index();
+  if (now_idx < from + TRACE_SAMPLES || now_idx - from > RING_N - 8) return;  // not buffered (any more)
+  QItem it{};
+  it.kind = Kind::TRACE;
+  it.found = bad ? 1 : 0;
+  it.t_ms = millis();
+  int n = snprintf(it.info, sizeof(it.info), "%c%03d:", bad ? 'b' : 'o', bitpos);
+  boiler::render_trace(this->ring_, RING_N - 1, from, TRACE_SAMPLES, this->dips_->baseline(), this->dips_->depth(), it.info + n);
   this->enqueue_(it);
 }
 
@@ -404,6 +437,11 @@ void BoilerBus::loop() {
         ESP_LOGD(TAG, "malformed burst: %s", it.info);
         if (this->malformed_info_text_sensor_) this->malformed_info_text_sensor_->publish_state(it.info);
         break;
+      case Kind::TRACE: {
+        auto *s = it.found ? this->malformed_trace_text_sensor_ : this->ok_trace_text_sensor_;
+        if (s) s->publish_state(it.info);
+        break;
+      }
       default: this->on_tx_event_(it); break;
     }
   }

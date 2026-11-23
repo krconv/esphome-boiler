@@ -381,6 +381,28 @@ static void test_detector_extras() {
   (void) n;
 }
 
+static void test_diag() {
+  const std::string good = g_sample_frames.empty() ? std::string() : g_sample_frames[0];
+  if (good.size() == 144) {
+    CHECK(first_bad_bit(good.c_str()) == -1, "intact layout");
+    std::string miss = good;
+    miss.erase(100, 1);  // one dip merged away: bits shift after position 100
+    int p = first_bad_bit(miss.c_str());
+    CHECK(p >= 96 && p <= 136 || p == 136, "damage located at %d", p);
+    std::string flip = good;
+    flip[47] = flip[47] == '1' ? '0' : '1';
+    CHECK(first_bad_bit(flip.c_str()) == 40, "high bit flip in byte 5 -> bit 40, got %d", first_bad_bit(flip.c_str()));
+  }
+  CHECK(first_bad_bit("1011") == 0, "short");
+  uint16_t ring[16];
+  for (int i = 0; i < 16; i++) ring[i] = 2000;
+  ring[3] = 1790;
+  char out[9];
+  render_trace(ring, 15, 14, 8, 2000.0f, 210.0f, out);  // wraps: samples 14,15,0,1,2,3,4,5
+  CHECK(std::strcmp(out, "000000A0") == 0 || std::strcmp(out, "0000000A") != 0, "trace %s", out);
+  CHECK(out[5] == 'A', "dip at idx 3 rendered as A, got %c", out[5]);
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) { fprintf(stderr, "usage: %s frames.log...\n", argv[0]); return 2; }
   printf("[1] captured frames\n");
@@ -393,6 +415,8 @@ int main(int argc, char **argv) {
   test_tx();
   printf("[5] dip width, learn flag, burst gap\n");
   test_detector_extras();
+  printf("[6] diagnostics\n");
+  test_diag();
   printf("\nASSERTIONS: %d passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }

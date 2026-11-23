@@ -104,6 +104,8 @@ class DipDetector {
 };
 
 // ---- dips -> bursts -> frames ---------------------------------------------
+constexpr size_t MAX_TRACK_DIPS = 160;
+
 struct BurstResult {
   ParseStatus status;
   Frame frame;
@@ -111,6 +113,7 @@ struct BurstResult {
   uint64_t start_sample;
   size_t ndips;            // dips in the burst
   uint64_t gap_samples;    // quiet time between the previous burst's last dip and this burst's first dip
+  uint16_t dip_off[MAX_TRACK_DIPS];  // dip start sample minus start_sample, first MAX_TRACK_DIPS dips
   char bits[FRAME_BITS + 17];  // the decoded bits as '0'/'1' (truncated), NUL-terminated; for diagnostics
 };
 
@@ -121,7 +124,7 @@ class BurstDecoder {
   bool on_dip(uint64_t sample_idx, BurstResult *res);
   // Call periodically with the current sample index. Finishes a burst once the quiet time exceeds ONE_MAX_US.
   bool on_idle(uint64_t sample_idx, BurstResult *res);
-  void abort() { bits_.clear(); have_last_ = false; }  // sample loss
+  void abort() { bits_.clear(); offs_.clear(); have_last_ = false; }  // sample loss
   float zero_period_us() const { return zero_period_us_; }  // EMA of bit-0 periods: shows real sample-clock error
   float one_period_us() const { return one_period_us_; }
   uint64_t last_dip_index() const { return last_dip_; }  // most recent dip start, kept after a burst finishes
@@ -135,9 +138,17 @@ class BurstDecoder {
   uint64_t last_dip_{0}, prev_burst_end_{0};
   bool seen_dip_{false}, have_prev_{false};
   std::vector<uint8_t> bits_;
+  std::vector<uint16_t> offs_;
   size_t dips_in_burst_{0};
   float zero_period_us_{0}, one_period_us_{0};
 };
+
+// Bit index (in '0'/'1' text, LSB-first bytes) of the first byte that breaks the frame layout, or -1 when the
+// layout is intact (CR, addresses, type bytes, 12 uppercase hex digits, LF). Used to locate decoding damage.
+int first_bad_bit(const char *bits);
+// Render ADC samples ring[(from+i) & mask], i in [0,n), as one hex digit each: (baseline - x) / (depth / 10),
+// clamped to 0..F. Writes n chars and a NUL.
+void render_trace(const uint16_t *ring, uint32_t mask, uint64_t from, size_t n, float baseline, float depth, char *out);
 
 // ---- register table and request/response pairing ---------------------------
 struct RegEntry {

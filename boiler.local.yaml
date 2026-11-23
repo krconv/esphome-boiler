@@ -176,6 +176,10 @@ boiler_bus:
     name: "Bus Malformed Long"
   malformed_info:
     name: "Bus Malformed Burst Info"
+  malformed_trace:
+    name: "Bus Malformed Trace"
+  ok_trace:
+    name: "Bus OK Trace"
   dip_width:
     name: "ADC Dip Width"
   rejected_dips:

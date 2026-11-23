@@ -144,12 +144,14 @@ void BurstDecoder::finish(BurstResult *res) {
       for (size_t i = 0; i < n; i++) res->bits[i] = bits_[i] ? '1' : '0';
       res->bits[n] = 0;
     }
+    for (size_t i = 0; i < MAX_TRACK_DIPS; i++) res->dip_off[i] = i < offs_.size() ? offs_[i] : 0;
     res->gap_samples = have_prev_ ? first_ - prev_burst_end_ : 0;
     res->status = dips_in_burst_ < MIN_BURST_DIPS ? ParseStatus::NOISE : parse_bits(bits_.data(), bits_.size(), &res->frame);
   }
   prev_burst_end_ = last_;
   have_prev_ = true;
   bits_.clear();
+  offs_.clear();
   have_last_ = false;
   dips_in_burst_ = 0;
 }
@@ -164,6 +166,7 @@ bool BurstDecoder::on_dip(uint64_t idx, BurstResult *res) {
     first_ = idx;
     dips_in_burst_ = 1;
     bits_.clear();
+    offs_.clear();
   } else {
     const float period = float(idx - last_) * us_per_sample_;
     const bool bit = period >= ZERO_MAX_US;
@@ -172,6 +175,7 @@ bool BurstDecoder::on_dip(uint64_t idx, BurstResult *res) {
     if (!bit && period > 100.0f) zero_period_us_ += (period - zero_period_us_) * (zero_period_us_ > 0 ? 1.0f / 64 : 1.0f);
     if (bit) one_period_us_ += (period - one_period_us_) * (one_period_us_ > 0 ? 1.0f / 64 : 1.0f);
   }
+  if (offs_.size() < MAX_TRACK_DIPS) offs_.push_back((uint16_t) std::min<uint64_t>(idx - first_, 65535));
   have_last_ = true;
   last_ = idx;
   last_dip_ = idx;
@@ -185,6 +189,36 @@ bool BurstDecoder::on_idle(uint64_t idx, BurstResult *res) {
     return true;
   }
   return false;
+}
+
+int first_bad_bit(const char *bits) {
+  const size_t n = std::strlen(bits);
+  for (size_t i = 0; i < FRAME_BYTES; i++) {
+    if ((i + 1) * 8 > n) return int(i * 8);
+    uint8_t v = 0;
+    for (int k = 0; k < 8; k++)
+      if (bits[i * 8 + k] == '1') v |= uint8_t(1u << k);
+    bool ok;
+    if (i == 0) ok = v == '\r';
+    else if (i == 1) ok = v == 0x51 || v == 0xA1;
+    else if (i == 2) ok = v == 0x51 || v == 0xA1;
+    else if (i == 3) ok = v == 0x10 || v == 0x11;
+    else if (i == 4) ok = v == 0x10 || v == 0x11;
+    else if (i < 17) ok = (v >= '0' && v <= '9') || (v >= 'A' && v <= 'F');
+    else ok = v == '\n';
+    if (!ok) return int(i * 8);
+  }
+  return -1;
+}
+
+void render_trace(const uint16_t *ring, uint32_t mask, uint64_t from, size_t n, float baseline, float depth, char *out) {
+  static const char H[] = "0123456789ABCDEF";
+  const float step = std::max(depth, 20.0f) / 10.0f;
+  for (size_t i = 0; i < n; i++) {
+    int v = int((baseline - float(ring[(from + i) & mask])) / step + 0.5f);
+    out[i] = H[v < 0 ? 0 : (v > 15 ? 15 : v)];
+  }
+  out[n] = 0;
 }
 
 // ---- pairing / table ------------------------------------------------------------

@@ -122,6 +122,8 @@ TEXT_SENSORS = {
     "error_history": dict(icon="mdi:alert-circle-outline"),
     "tx_last_result": dict(icon="mdi:send-check", entity_category=CAT),
     "malformed_info": dict(icon="mdi:bug-outline", entity_category=CAT),  # latest malformed burst, at most 1 per second
+    "malformed_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # ADC trace around the damage, 1 hex digit/sample
+    "ok_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # ADC trace inside a good frame, every 10 s
 }
 
 CONFIG_SCHEMA = cv.Schema(
