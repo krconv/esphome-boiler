@@ -169,13 +169,22 @@ switch:
   - platform: template
     name: "Experiment sweep"
     icon: mdi:flask-outline
+    id: experiment_sweep_switch
+    restore_mode: ALWAYS_OFF
     entity_category: config
-    update_interval: 1s
-    lambda: return id(boiler_bus_hub).experiment_sweep_active();
+    optimistic: true
     turn_on_action:
       - lambda: id(boiler_bus_hub).experiment_sweep(true);
     turn_off_action:
       - lambda: id(boiler_bus_hub).experiment_sweep(false);
+
+# the sweep ends (or is refused) inside the component: reflect that on the switch
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (id(experiment_sweep_switch).state && !id(boiler_bus_hub).experiment_sweep_active())
+            id(experiment_sweep_switch).publish_state(false);
 
 button:
   - platform: template
