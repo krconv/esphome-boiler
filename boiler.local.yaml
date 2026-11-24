@@ -167,7 +167,7 @@ sensor:
     filters:
       - multiply: 36.39
   - platform: total_daily_energy
-    name: "Propane used today"
+    name: "Propane Daily Usage"
     power_id: propane_rate
     unit_of_measurement: "gal"
     device_class: volume
