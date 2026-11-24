@@ -208,12 +208,17 @@ inline float decode_temp_c(uint16_t v) { return float(v >> 8) + float(v & 0xFF) 
 // 32-bit counter whose low word is the even register, high word the odd one.
 inline uint32_t join32(uint16_t hi, uint16_t lo) { return (uint32_t(hi) << 16) | lo; }
 
-// ---- CH setpoint (register 0101): high byte = whole deg C, low byte 0x05 for +0.5, else 0x00 --------
+// ---- setpoints (registers 0101 CH, 0102 DHW): high byte = whole deg C, low byte 0x05 for +0.5, else 0x00 --------
+constexpr uint16_t REG_CH_SETPOINT = 0x0101, REG_DHW_SETPOINT = 0x0102;
 constexpr float CH_SETPOINT_MIN_C = 30.0f, CH_SETPOINT_MAX_C = 60.0f;
-constexpr uint16_t REG_CH_SETPOINT = 0x0101;
-bool setpoint_in_range(float c);          // finite and within [30, 60]
-uint16_t encode_setpoint(float c);        // clamped to [30, 60], rounded to the nearest 0.5: 38.0 -> 2600, 37.5 -> 2505
-float decode_setpoint(uint16_t v);        // inverse of encode_setpoint (same as decode_temp_c)
+constexpr float DHW_SETPOINT_MIN_C = 32.0f, DHW_SETPOINT_MAX_C = 60.0f;
+bool is_setpoint_reg(uint16_t reg);           // 0101 or 0102
+const char *setpoint_name(uint16_t reg);      // "CH" / "DHW"
+float setpoint_min_c(uint16_t reg);           // 30 (CH) / 32 (DHW)
+float setpoint_max_c(uint16_t reg);           // 60
+bool setpoint_in_range(uint16_t reg, float c);   // finite and within the register's range
+uint16_t encode_setpoint(uint16_t reg, float c); // clamped to the range, rounded to the nearest 0.5: 38.0 -> 2600, 37.5 -> 2505
+float decode_setpoint(uint16_t v);               // inverse of encode_setpoint (same as decode_temp_c)
 
 // register 0010 bits
 constexpr uint16_t ST_CH_DEMAND = 0x0002;

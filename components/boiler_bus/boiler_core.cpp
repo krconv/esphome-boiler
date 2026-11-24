@@ -421,12 +421,19 @@ Frame make_write_request(uint16_t reg, uint16_t val) {
   return f;
 }
 
-bool setpoint_in_range(float c) { return std::isfinite(c) && c >= CH_SETPOINT_MIN_C && c <= CH_SETPOINT_MAX_C; }
+bool is_setpoint_reg(uint16_t reg) { return reg == REG_CH_SETPOINT || reg == REG_DHW_SETPOINT; }
+const char *setpoint_name(uint16_t reg) { return reg == REG_DHW_SETPOINT ? "DHW" : "CH"; }
+float setpoint_min_c(uint16_t reg) { return reg == REG_DHW_SETPOINT ? DHW_SETPOINT_MIN_C : CH_SETPOINT_MIN_C; }
+float setpoint_max_c(uint16_t reg) { return reg == REG_DHW_SETPOINT ? DHW_SETPOINT_MAX_C : CH_SETPOINT_MAX_C; }
 
-uint16_t encode_setpoint(float c) {
-  if (!std::isfinite(c)) c = CH_SETPOINT_MIN_C;
-  if (c < CH_SETPOINT_MIN_C) c = CH_SETPOINT_MIN_C;
-  if (c > CH_SETPOINT_MAX_C) c = CH_SETPOINT_MAX_C;
+bool setpoint_in_range(uint16_t reg, float c) {
+  return std::isfinite(c) && c >= setpoint_min_c(reg) && c <= setpoint_max_c(reg);
+}
+
+uint16_t encode_setpoint(uint16_t reg, float c) {
+  const float lo = setpoint_min_c(reg), hi = setpoint_max_c(reg);
+  if (!std::isfinite(c) || c < lo) c = lo;
+  if (c > hi) c = hi;
   const int half = (int) std::floor(c * 2.0f + 0.5f);  // half degrees
   return uint16_t(((half / 2) << 8) | ((half & 1) ? 0x05 : 0x00));
 }

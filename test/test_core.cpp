@@ -452,20 +452,27 @@ static void test_write_setpoint() {
   CHECK(tx_pulses_safe(tx_frame_pulses(b, TX_DIP_US_FIXED)), "fixed dip width is safe");
 
   // value encoding from the examples
-  CHECK(encode_setpoint(38.0f) == 0x2600 && encode_setpoint(37.5f) == 0x2505 && encode_setpoint(42.5f) == 0x2A05 && encode_setpoint(43.5f) == 0x2B05,
+  CHECK(encode_setpoint(REG_CH_SETPOINT, 38.0f) == 0x2600 && encode_setpoint(REG_CH_SETPOINT, 37.5f) == 0x2505 && encode_setpoint(REG_CH_SETPOINT, 42.5f) == 0x2A05 && encode_setpoint(REG_CH_SETPOINT, 43.5f) == 0x2B05,
         "encode examples");
   CHECK(decode_setpoint(0x2600) == 38.0f && decode_setpoint(0x2505) == 37.5f && decode_setpoint(0x2A05) == 42.5f && decode_setpoint(0x2B05) == 43.5f,
         "decode examples");
   for (int h = 60; h <= 120; h++) {  // every half degree 30.0 .. 60.0 round-trips
     const float c = h / 2.0f;
-    CHECK(decode_setpoint(encode_setpoint(c)) == c, "round trip %.1f", c);
-    CHECK((encode_setpoint(c) & 0xFF) == ((h & 1) ? 0x05 : 0x00), "low byte %.1f", c);
+    CHECK(decode_setpoint(encode_setpoint(REG_CH_SETPOINT, c)) == c, "round trip %.1f", c);
+    CHECK((encode_setpoint(REG_CH_SETPOINT, c) & 0xFF) == ((h & 1) ? 0x05 : 0x00), "low byte %.1f", c);
   }
   // rounding to 0.5 and clamping to 30..60
-  CHECK(encode_setpoint(37.7f) == 0x2505 && encode_setpoint(37.8f) == 0x2600 && encode_setpoint(37.3f) == 0x2505 && encode_setpoint(37.24f) == 0x2500, "rounding");
-  CHECK(encode_setpoint(10) == 0x1E00 && encode_setpoint(99) == 0x3C00 && encode_setpoint(-5) == 0x1E00 && encode_setpoint(NAN) == 0x1E00, "clamp");
-  CHECK(setpoint_in_range(30) && setpoint_in_range(60) && setpoint_in_range(45.5f), "in range");
-  CHECK(!setpoint_in_range(29.5f) && !setpoint_in_range(60.5f) && !setpoint_in_range(NAN) && !setpoint_in_range(INFINITY), "out of range");
+  CHECK(encode_setpoint(REG_CH_SETPOINT, 37.7f) == 0x2505 && encode_setpoint(REG_CH_SETPOINT, 37.8f) == 0x2600 && encode_setpoint(REG_CH_SETPOINT, 37.3f) == 0x2505 && encode_setpoint(REG_CH_SETPOINT, 37.24f) == 0x2500, "rounding");
+  CHECK(encode_setpoint(REG_CH_SETPOINT, 10) == 0x1E00 && encode_setpoint(REG_CH_SETPOINT, 99) == 0x3C00 && encode_setpoint(REG_CH_SETPOINT, -5) == 0x1E00 && encode_setpoint(REG_CH_SETPOINT, NAN) == 0x1E00, "clamp");
+  CHECK(setpoint_in_range(REG_CH_SETPOINT, 30) && setpoint_in_range(REG_CH_SETPOINT, 60) && setpoint_in_range(REG_CH_SETPOINT, 45.5f), "in range");
+  CHECK(!setpoint_in_range(REG_CH_SETPOINT, 29.5f) && !setpoint_in_range(REG_CH_SETPOINT, 60.5f) && !setpoint_in_range(REG_CH_SETPOINT, NAN) && !setpoint_in_range(REG_CH_SETPOINT, INFINITY), "out of range");
+  // DHW register: 32..60, same encoding
+  CHECK(encode_setpoint(REG_DHW_SETPOINT, 60.0f) == 0x3C00 && encode_setpoint(REG_DHW_SETPOINT, 46.5f) == 0x2E05 && encode_setpoint(REG_DHW_SETPOINT, 32.0f) == 0x2000, "dhw encode");
+  CHECK(encode_setpoint(REG_DHW_SETPOINT, 31) == 0x2000 && encode_setpoint(REG_DHW_SETPOINT, 10) == 0x2000 && encode_setpoint(REG_DHW_SETPOINT, NAN) == 0x2000 && encode_setpoint(REG_DHW_SETPOINT, 99) == 0x3C00, "dhw clamp");
+  CHECK(setpoint_in_range(REG_DHW_SETPOINT, 32) && setpoint_in_range(REG_DHW_SETPOINT, 60) && !setpoint_in_range(REG_DHW_SETPOINT, 31.5f) && !setpoint_in_range(REG_DHW_SETPOINT, 60.5f) &&
+            !setpoint_in_range(REG_DHW_SETPOINT, NAN), "dhw range");
+  for (int h = 64; h <= 120; h++) CHECK(decode_setpoint(encode_setpoint(REG_DHW_SETPOINT, h / 2.0f)) == h / 2.0f, "dhw round trip %d", h);
+  CHECK(is_setpoint_reg(0x0101) && is_setpoint_reg(0x0102) && !is_setpoint_reg(0x0103), "setpoint regs");
 }
 
 static void test_scheduler() {
@@ -545,7 +552,7 @@ static void test_poller() {
     s.p.on_display_request(s.t + 10);
     s.p.update(s.t + 20);
     CHECK(s.p.display_present(s.t + 20) && !s.p.armed(&r), "display -> disarmed");
-    CHECK(s.p.request_write(s.t + 30, 0x2505) == WriteResult::NOT_MASTER, "write refused with display");
+    CHECK(s.p.request_write(s.t + 30, REG_CH_SETPOINT, 0x2505) == WriteResult::NOT_MASTER, "write refused with display");
     s.p.update(s.t + 4000);
     CHECK(!s.p.armed(&r), "still idle at 4 s");
     s.p.update(s.t + 5100);
@@ -561,17 +568,17 @@ static void test_poller() {
     CHECK(p.armed(&r), "master after 5 s");
     p.set_enabled(false);
     p.update(5100);
-    CHECK(!p.armed(&r) && p.request_write(5100, 0x2505) == WriteResult::NOT_MASTER, "switch off: idle, no writes");
+    CHECK(!p.armed(&r) && p.request_write(5100, REG_CH_SETPOINT, 0x2505) == WriteResult::NOT_MASTER, "switch off: idle, no writes");
   }
   {  // full write: wait for fast mode, ack, repeat after 13.5 s, ack, read back
     Sim s;
     s.p.update(s.t);
-    CHECK(s.p.request_write(s.t, 0x2505) == WriteResult::OK, "write accepted");
+    CHECK(s.p.request_write(s.t, REG_CH_SETPOINT, 0x2505) == WriteResult::OK, "write accepted");
     PollRequest r;
     CHECK(s.p.armed(&r) && !r.is_write(), "ping mode: write waits");
     s.fire(); s.t += 80; s.answer(0x0A); s.p.update(s.t);  // joined
     CHECK(s.p.armed(&r) && r.is_write() && r.reg == 0x0101 && r.val == 0x2505, "write armed in fast mode");
-    CHECK(s.p.request_write(s.t, 0x2600) == WriteResult::BUSY, "second write refused while busy");
+    CHECK(s.p.request_write(s.t, REG_CH_SETPOINT, 0x2600) == WriteResult::BUSY, "second write refused while busy");
     s.fire(); s.t += 5; s.p.update(s.t);
     CHECK(s.p.armed(&r) && !r.is_write(), "no duplicate write while in flight");
     s.t += 80; s.answer(0x2505); s.p.update(s.t);
@@ -590,24 +597,62 @@ static void test_poller() {
     s.fire(); s.t += 80; s.answer(0x2505); s.p.update(s.t);
     CHECK(has_event(s.p.take_events(), "confirmed") && !s.p.write_active(), "read-back confirms");
   }
+  {  // DHW (0102): same sequence on the other register, 32.0 floor, and a missing ack ends gracefully
+    Sim s;
+    s.p.update(s.t);
+    CHECK(s.p.request_write(s.t, REG_DHW_SETPOINT, 0x3C00) == WriteResult::OK, "dhw write accepted");
+    PollRequest r;
+    s.fire(); s.t += 80; s.answer(0x0A); s.p.update(s.t);  // joined
+    CHECK(s.p.armed(&r) && r.is_write() && r.reg == 0x0102 && r.val == 0x3C00, "dhw write armed on 0102");
+    s.fire(); s.t += 80; s.answer(0x3C00); s.p.update(s.t);
+    CHECK(has_event(s.p.take_events(), "DHW setpoint write 3C00 acked, repeating"), "dhw ack event");
+    uint32_t t_ack = s.t;
+    while (!(s.p.armed(&r) && r.is_write()) && s.t < t_ack + 15000) { s.t += 50; s.p.update(s.t); if (!s.p.armed(&r) || !r.is_write()) { s.fire(); s.answer(0); } }
+    CHECK(r.is_write() && r.reg == 0x0102 && s.t >= t_ack + 13500, "dhw second write at >= 13.5 s");
+    s.fire(); s.t += 80; s.answer(0x3C00); s.p.update(s.t);
+    CHECK(s.p.armed(&r) && !r.is_write() && r.reg == 0x0102, "dhw read-back armed on 0102");
+    s.fire(); s.t += 80; s.answer(0x3C00); s.p.update(s.t);
+    CHECK(has_event(s.p.take_events(), "DHW setpoint 3C00 confirmed") && !s.p.write_active(), "dhw read-back confirms");
+  }
+  {  // DHW write the board ignores: 3 unanswered tries, then "not acknowledged", no endless retry
+    Sim s;
+    s.p.update(s.t);
+    s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);  // joined
+    s.p.request_write(s.t, REG_DHW_SETPOINT, 0x3C00);
+    s.p.update(s.t);
+    int sent = 0;
+    for (int i = 0; i < 6 && s.p.write_active(); i++) { s.p.update(s.t); s.fire(); sent += s.last.is_write(); s.t += 300; s.p.update(s.t); }
+    CHECK(has_event(s.p.take_events(), "DHW setpoint write 3C00 failed: not acknowledged") && !s.p.write_active() && sent <= 3, "dhw no ack: gives up (%d sends)", sent);
+    PollRequest r;
+    s.p.update(s.t);
+    CHECK(s.p.armed(&r) && !r.is_write(), "back to plain polling");
+  }
+  {  // DHW floor is 32, CH floor is 30; other registers refused
+    Sim s;
+    s.p.update(s.t);
+    CHECK(s.p.request_write(s.t, REG_DHW_SETPOINT, 0x1F05) == WriteResult::OUT_OF_RANGE && s.p.request_write(s.t, REG_DHW_SETPOINT, 0x3C05) == WriteResult::OUT_OF_RANGE &&
+              s.p.request_write(s.t, 0x0103, 0x2600) == WriteResult::OUT_OF_RANGE,
+          "dhw out-of-range / foreign register rejected");
+    CHECK(s.p.request_write(s.t, REG_DHW_SETPOINT, 0x2000) == WriteResult::OK, "32.0 accepted for dhw");
+  }
   {  // failures: ack with a different value, no ack, wrong read-back, display appears
     Sim s;
     s.p.update(s.t);
-    s.p.request_write(s.t, 0x2505);
+    s.p.request_write(s.t, REG_CH_SETPOINT, 0x2505);
     s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
     s.fire(); s.t += 80; s.answer(0x2600); s.p.update(s.t);
     CHECK(has_event(s.p.take_events(), "ack mismatch") && !s.p.write_active(), "ack mismatch fails");
 
-    s.p.request_write(s.t, 0x2505);
+    s.p.request_write(s.t, REG_CH_SETPOINT, 0x2505);
     s.p.update(s.t);
     for (int i = 0; i < 3 && s.p.write_active(); i++) { s.fire(); s.t += 300; s.p.update(s.t); }
-    CHECK(has_event(s.p.take_events(), "no ack") && !s.p.write_active(), "no ack fails after 3 tries");
+    CHECK(has_event(s.p.take_events(), "not acknowledged") && !s.p.write_active(), "no ack fails after 3 tries");
   }
   {
     Sim s;
     s.p.update(s.t);
     s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
-    s.p.request_write(s.t, 0x2505); s.p.update(s.t);
+    s.p.request_write(s.t, REG_CH_SETPOINT, 0x2505); s.p.update(s.t);
     s.p.on_display_request(s.t + 10);
     s.p.update(s.t + 20);
     CHECK(has_event(s.p.take_events(), "display appeared") && !s.p.write_active(), "display appearing aborts the write");
@@ -615,10 +660,10 @@ static void test_poller() {
   {
     Sim s;
     s.p.update(s.t);
-    CHECK(s.p.request_write(s.t, 0x2900 + 0x1700) == WriteResult::OUT_OF_RANGE && s.p.request_write(s.t, 0x1D05) == WriteResult::OUT_OF_RANGE &&
-              s.p.request_write(s.t, 0x3C05) == WriteResult::OUT_OF_RANGE,
+    CHECK(s.p.request_write(s.t, REG_CH_SETPOINT, 0x2900 + 0x1700) == WriteResult::OUT_OF_RANGE && s.p.request_write(s.t, REG_CH_SETPOINT, 0x1D05) == WriteResult::OUT_OF_RANGE &&
+              s.p.request_write(s.t, REG_CH_SETPOINT, 0x3C05) == WriteResult::OUT_OF_RANGE,
           "out-of-range values rejected");
-    CHECK(s.p.request_write(s.t, 0x1E00) == WriteResult::OK, "30.0 accepted");
+    CHECK(s.p.request_write(s.t, REG_CH_SETPOINT, 0x1E00) == WriteResult::OK, "30.0 accepted");
   }
 }
 

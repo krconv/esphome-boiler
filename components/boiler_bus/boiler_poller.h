@@ -64,7 +64,8 @@ class Poller {
   bool on_board_response(uint32_t now, const Frame &f);          // a CRC-valid board response; true if it answered us
   void update(uint32_t now);                                     // timeouts, arming; call every loop
 
-  WriteResult request_write(uint32_t now, uint16_t val);
+  // write val to a setpoint register (REG_CH_SETPOINT / REG_DHW_SETPOINT); OUT_OF_RANGE for any other register
+  WriteResult request_write(uint32_t now, uint16_t reg, uint16_t val);
   bool write_active() const { return wstate_ != WState::NONE; }
 
   // human-readable events since the last call (joined, lost, write results, ...)
@@ -90,7 +91,7 @@ class Poller {
   bool had_master_{false};
 
   WState wstate_{WState::NONE};
-  uint16_t wval_{0};
+  uint16_t wreg_{REG_CH_SETPOINT}, wval_{0};
   uint32_t wtries_{0}, wrepeat_at_{0};
   std::vector<std::string> events_;
 };

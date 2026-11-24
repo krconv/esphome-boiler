@@ -665,29 +665,35 @@ void BoilerBus::set_polling_enabled(bool on) {
   ESP_LOGI(TAG, "bus polling %s", on ? "on" : "off");
 }
 
-float BoilerBus::ch_setpoint_c() const {
-  const auto *e = this->table_.get(boiler::REG_CH_SETPOINT);
+float BoilerBus::setpoint_c_(uint16_t reg) const {
+  const auto *e = this->table_.get(reg);
   return e ? boiler::decode_setpoint(e->val) : NAN;
 }
 
-bool BoilerBus::write_ch_setpoint(float c) {
+float BoilerBus::ch_setpoint_c() const { return this->setpoint_c_(boiler::REG_CH_SETPOINT); }
+float BoilerBus::dhw_setpoint_c() const { return this->setpoint_c_(boiler::REG_DHW_SETPOINT); }
+bool BoilerBus::write_ch_setpoint(float c) { return this->write_setpoint_(boiler::REG_CH_SETPOINT, c); }
+bool BoilerBus::write_dhw_setpoint(float c) { return this->write_setpoint_(boiler::REG_DHW_SETPOINT, c); }
+
+bool BoilerBus::write_setpoint_(uint16_t reg, float c) {
   const uint32_t now = millis();
-  if (!boiler::setpoint_in_range(c)) {
-    ESP_LOGW(TAG, "CH setpoint %.1f C refused: outside %.0f..%.0f C", c, boiler::CH_SETPOINT_MIN_C, boiler::CH_SETPOINT_MAX_C);
+  const char *name = boiler::setpoint_name(reg);
+  if (!boiler::setpoint_in_range(reg, c)) {
+    ESP_LOGW(TAG, "%s setpoint %.1f C refused: outside %.0f..%.0f C", name, c, boiler::setpoint_min_c(reg), boiler::setpoint_max_c(reg));
     return false;
   }
-  const uint16_t val = boiler::encode_setpoint(c);
-  const auto r = this->poller_.request_write(now, val);
+  const uint16_t val = boiler::encode_setpoint(reg, c);
+  const auto r = this->poller_.request_write(now, reg, val);
   switch (r) {
     case boiler::WriteResult::OK:
-      ESP_LOGI(TAG, "CH setpoint write queued: %.1f C = %04X", boiler::decode_setpoint(val), val);
-      if (this->poll_result_text_sensor_) this->poll_result_text_sensor_->publish_state("setpoint write queued");
+      ESP_LOGI(TAG, "%s setpoint write queued: %.1f C = %04X", name, boiler::decode_setpoint(val), val);
+      if (this->poll_result_text_sensor_) this->poll_result_text_sensor_->publish_state(std::string(name) + " setpoint write queued");
       return true;
     case boiler::WriteResult::NOT_MASTER:
-      ESP_LOGW(TAG, "CH setpoint write refused: %s", this->poller_.enabled() ? "a display is on the bus" : "bus polling is off");
+      ESP_LOGW(TAG, "%s setpoint write refused: %s", name, this->poller_.enabled() ? "a display is on the bus" : "bus polling is off");
       break;
-    case boiler::WriteResult::BUSY: ESP_LOGW(TAG, "CH setpoint write refused: previous write still running"); break;
-    default: ESP_LOGW(TAG, "CH setpoint write refused: value out of range"); break;
+    case boiler::WriteResult::BUSY: ESP_LOGW(TAG, "%s setpoint write refused: previous write still running", name); break;
+    default: ESP_LOGW(TAG, "%s setpoint write refused: value out of range", name); break;
   }
   return false;
 }

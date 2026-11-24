@@ -32,17 +32,17 @@ void Poller::disarm_() {
 }
 
 void Poller::fail_write_(const char *why) {
-  char b[96];
-  snprintf(b, sizeof(b), "CH setpoint write %04X failed: %s", wval_, why);
+  char b[112];
+  snprintf(b, sizeof(b), "%s setpoint write %04X failed: %s", setpoint_name(wreg_), wval_, why);
   event_(b);
   wstate_ = WState::NONE;
 }
 
-WriteResult Poller::request_write(uint32_t now, uint16_t val) {
+WriteResult Poller::request_write(uint32_t now, uint16_t reg, uint16_t val) {
   if (!is_master(now)) return WriteResult::NOT_MASTER;
   if (wstate_ != WState::NONE) return WriteResult::BUSY;
-  const float c = decode_setpoint(val);
-  if (!setpoint_in_range(c)) return WriteResult::OUT_OF_RANGE;
+  if (!is_setpoint_reg(reg) || !setpoint_in_range(reg, decode_setpoint(val))) return WriteResult::OUT_OF_RANGE;
+  wreg_ = reg;
   wval_ = val;
   wtries_ = 0;
   wstate_ = WState::SEND1;
@@ -75,18 +75,18 @@ bool Poller::on_board_response(uint32_t now, const Frame &f) {
       wstate_ = WState::WAIT_REPEAT;
       wtries_ = 0;
       wrepeat_at_ = now + cfg_.write_repeat_ms;
-      char b[64];
-      snprintf(b, sizeof(b), "CH setpoint write %04X acked, repeating in %u ms", wval_, (unsigned) cfg_.write_repeat_ms);
+      char b[80];
+      snprintf(b, sizeof(b), "%s setpoint write %04X acked, repeating in %u ms", setpoint_name(wreg_), wval_, (unsigned) cfg_.write_repeat_ms);
       event_(b);
     } else if (wstate_ == WState::SEND2) {
       wstate_ = WState::READBACK;
       wtries_ = 0;
-      event_("CH setpoint write acked twice, reading back");
+      event_(std::string(setpoint_name(wreg_)) + " setpoint write acked twice, reading back");
     }
-  } else if (wstate_ == WState::READBACK && inflight_.reg == REG_CH_SETPOINT) {
+  } else if (wstate_ == WState::READBACK && inflight_.reg == wreg_) {
     char b[80];
     if (f.val == wval_) {
-      snprintf(b, sizeof(b), "CH setpoint %04X confirmed by read-back", f.val);
+      snprintf(b, sizeof(b), "%s setpoint %04X confirmed by read-back", setpoint_name(wreg_), f.val);
       event_(b);
       wstate_ = WState::NONE;
     } else {
@@ -101,13 +101,13 @@ void Poller::miss_(uint32_t) {
   inflight_valid_ = false;
   misses_++;
   const bool was_write = inflight_.is_write();
-  const bool was_readback = !was_write && wstate_ == WState::READBACK && inflight_.reg == REG_CH_SETPOINT;
+  const bool was_readback = !was_write && wstate_ == WState::READBACK && inflight_.reg == wreg_;
   if (mode_ == PollMode::FAST && misses_ >= cfg_.max_misses) {
     mode_ = PollMode::PING;
     event_("lost: no answers, back to ping slot");
   }
   if ((was_write || was_readback) && wstate_ != WState::NONE && ++wtries_ >= cfg_.write_tries)
-    fail_write_(was_write ? "no ack" : "no read-back");
+    fail_write_(was_write ? "not acknowledged (no ack)" : "no read-back");
 }
 
 void Poller::update(uint32_t now) {
@@ -135,14 +135,14 @@ void Poller::update(uint32_t now) {
   // what goes out next: a due write, the read-back, else the next scheduled read
   const bool fast = mode_ == PollMode::FAST;
   // no second write / read-back while the first one is still in flight
-  const bool busy_reg = inflight_valid_ && inflight_.reg == REG_CH_SETPOINT;
+  const bool busy_reg = inflight_valid_ && inflight_.reg == wreg_;
   PollRequest want;
   bool is_prio = false;
   if (fast && !busy_reg && (wstate_ == WState::SEND1 || wstate_ == WState::SEND2)) {
-    want = {REG_CH_SETPOINT, wval_, 0x10};
+    want = {wreg_, wval_, 0x10};
     is_prio = true;
   } else if (fast && !busy_reg && wstate_ == WState::READBACK) {
-    want = {REG_CH_SETPOINT, 0, 0x11};
+    want = {wreg_, 0, 0x11};
     is_prio = true;
   }
   if (is_prio) {

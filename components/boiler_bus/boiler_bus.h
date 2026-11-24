@@ -74,6 +74,9 @@ class BoilerBus : public Component {
   float ch_setpoint_c() const;
   // Queue a write of the heating setpoint. false (and a log line) if refused: out of 30..60 C, display present, polling off, busy.
   bool write_ch_setpoint(float celsius);
+  // Same for the hot water setpoint (register 0102, 32..60 C).
+  float dhw_setpoint_c() const;
+  bool write_dhw_setpoint(float celsius);
 
   void setup() override;
   void loop() override;
@@ -114,6 +117,8 @@ class BoilerBus : public Component {
   void on_register_(uint16_t reg, uint16_t val, uint32_t now);
   void publish_counter_(uint16_t hi_reg, uint16_t lo_reg, sensor::Sensor *s);
   void publish_error_history_();
+  float setpoint_c_(uint16_t reg) const;
+  bool write_setpoint_(uint16_t reg, float celsius);
   void tick_(uint32_t now);
   void publish_diagnostics_(uint32_t now);
   void pub_(sensor::Sensor *s, float v, uint32_t now);

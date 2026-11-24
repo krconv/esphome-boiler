@@ -87,6 +87,7 @@ boiler_bus:
     name: "Last error"
   error_history:
     name: "Error history"
+    entity_category: diagnostic
 
   # temperatures
   supply_temperature:
@@ -99,8 +100,6 @@ boiler_bus:
     name: "Hot water outlet temperature"
   exhaust_temperature:
     name: "Exhaust temperature"
-  dhw_setpoint:
-    name: "Hot water setpoint"
 
   # combustion and water side
   fan_rpm:
@@ -159,7 +158,8 @@ switch:
     turn_off_action:
       - lambda: id(boiler_bus_hub).set_polling_enabled(false);
 
-# Heating (CH) setpoint, register 0101. The state is what the boiler reports, not the last command.
+# Heating (CH) setpoint, register 0101, and hot water (DHW) setpoint, register 0102. The state is what the boiler
+# reports, not the last command. Writes only go out while polling is on and no display is connected.
 number:
   - platform: template
     name: "Heating setpoint"
@@ -177,3 +177,20 @@ number:
       return v;
     set_action:
       - lambda: id(boiler_bus_hub).write_ch_setpoint(x);
+
+  - platform: template
+    name: "Hot water setpoint"
+    icon: mdi:water-thermometer
+    device_class: temperature
+    unit_of_measurement: "°C"
+    mode: box
+    min_value: 32
+    max_value: 60
+    step: 0.5
+    update_interval: 2s
+    lambda: |-
+      float v = id(boiler_bus_hub).dhw_setpoint_c();
+      if (std::isnan(v)) return {};
+      return v;
+    set_action:
+      - lambda: id(boiler_bus_hub).write_dhw_setpoint(x);
