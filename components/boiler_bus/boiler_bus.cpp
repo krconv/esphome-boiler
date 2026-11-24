@@ -781,7 +781,9 @@ void BoilerBus::exp_record_(const boiler::BurstResult &br, bool own) {
   e.t_ms = (since_fire_us + this->exp_fire_gap_us_) / 1000.0f;
   e.ok = br.status == ParseStatus::OK;
   e.reg = e.ok ? br.frame.reg : 0;
-  if (own && !this->exp_have_own_) {
+  // the first burst is ours. A collision merges our frame with the display's into one longer burst that finishes after
+  // tx_active_ is over, so `own` alone would miss it: also accept a burst that starts right at the moment we fired.
+  if (!this->exp_have_own_ && (own || since_fire_us < 6000.0f)) {
     e.kind = 'O';
     this->exp_have_own_ = true;
   } else if (e.ok && br.frame.from_board()) {
