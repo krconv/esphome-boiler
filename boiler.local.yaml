@@ -116,8 +116,11 @@ boiler_bus:
     name: "Gas input"
   propane_gal_h:
     name: "Propane rate"
+    id: propane_rate
+    device_class: volume_flow_rate
   propane_total:
     name: "Propane used"
+    id: propane_used
 
   # counters
   power_on_hours:
@@ -144,6 +147,33 @@ boiler_bus:
     name: "Bus malformed frames"
   last_frame_age:
     name: "Bus last frame age"
+
+
+# Home Assistant energy dashboard: gas must be in ft³/m³ (not liquid gallons).
+# 1 US gal of liquid propane ≈ 36.39 ft³ of vapor at 60 °F.
+time:
+  - platform: homeassistant
+    id: ha_time
+
+sensor:
+  - platform: copy
+    source_id: propane_used
+    name: "Propane gas used"
+    unit_of_measurement: "ft³"
+    device_class: gas
+    state_class: total_increasing
+    icon: mdi:propane-tank
+    accuracy_decimals: 2
+    filters:
+      - multiply: 36.39
+  - platform: total_daily_energy
+    name: "Propane used today"
+    power_id: propane_rate
+    unit_of_measurement: "gal"
+    device_class: volume
+    state_class: total_increasing
+    icon: mdi:counter
+    accuracy_decimals: 3
 
 # Bus polling: off = listen only. Writes are only sent while polling is on and no display is connected.
 switch:
