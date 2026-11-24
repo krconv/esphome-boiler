@@ -544,6 +544,87 @@ static void test_poller() {
     Frame f; f.addr1 = 0x51; f.addr2 = 0xA1; f.type = 0x11; f.sub = 0x11; f.reg = 0x0099; f.val = 1;
     CHECK(!s.p.on_board_response(s.t + 50, f) && s.p.mode() == PollMode::PING, "other register ignored");
   }
+  {  // deadlock: armed request consumed without a TX_SENT (sampler cleared it, event dropped), only presence frames follow
+    Sim s;
+    s.p.update(s.t);
+    s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
+    CHECK(s.p.mode() == PollMode::FAST, "joined");
+    s.p.take_events();
+    PollRequest r;
+    s.t += 100; s.p.update(s.t);
+    CHECK(s.p.armed(&r), "next armed");
+    uint32_t seq = s.p.armed_seq();
+    for (int i = 0; i < 90 && s.p.mode() == PollMode::FAST; i++) { s.t += 100; s.p.update(s.t); }  // never fired
+    CHECK(s.p.mode() == PollMode::PING, "never-sent requests count as misses -> ping");
+    CHECK(s.p.armed_seq() != seq && s.p.armed(&r), "re-armed for the ping slot");
+    CHECK(has_event(s.p.take_events(), "lost board, rejoining"), "rejoin message");
+    s.fire(); s.t += 80; s.answer(2); s.p.update(s.t);
+    CHECK(s.p.mode() == PollMode::FAST, "rejoined and resumed");
+  }
+  {  // request sent, no reply, then only a 0020 presence frame every 3.1 s: must rejoin and resume
+    Sim s;
+    s.p.update(s.t);
+    s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
+    s.p.take_events();
+    s.fire(); s.t += 300; s.p.update(s.t);  // unanswered
+    Frame pres; pres.addr1 = 0x51; pres.addr2 = 0xA1; pres.type = 0x11; pres.sub = 0x11; pres.reg = 0x0020; pres.val = 0x1234;
+    s.t += 3100 - 300;
+    s.p.on_board_unsolicited(s.t, pres);
+    CHECK(s.p.mode() == PollMode::PING && has_event(s.p.take_events(), "lost board, rejoining"), "presence frame while joined -> rejoin");
+    s.p.update(s.t);
+    PollRequest r;
+    CHECK(s.p.armed(&r), "armed for the ping slot");
+    s.fire(); s.t += 80; s.answer(3); s.p.update(s.t);
+    CHECK(s.p.mode() == PollMode::FAST, "rejoined");
+  }
+  {  // presence frame right after an answer (our own 0020 reply) is not a loss
+    Sim s;
+    s.p.update(s.t);
+    s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
+    Frame pres; pres.addr1 = 0x51; pres.addr2 = 0xA1; pres.type = 0x11; pres.sub = 0x11; pres.reg = 0x0020; pres.val = 1;
+    s.t += 100;
+    s.p.on_board_unsolicited(s.t, pres);
+    CHECK(s.p.mode() == PollMode::FAST, "recent answer: stay joined");
+  }
+  {  // watchdog: joined, requests keep being sent but nothing resets the miss count for 10 s (misses reset by hand)
+    Sim s;
+    PollerConfig c;
+    c.max_misses = 1000;
+    Poller p(c, PollScheduler::defaults());
+    s.p = p;
+    s.p.update(s.t);
+    s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
+    s.p.take_events();
+    uint32_t t0 = s.t;
+    while (s.t < t0 + 9900) { s.fire(); s.t += 300; s.p.update(s.t); }
+    CHECK(s.p.mode() == PollMode::FAST, "no watchdog before 10 s");
+    while (s.t < t0 + 10600 && s.p.mode() == PollMode::FAST) { s.fire(); s.t += 300; s.p.update(s.t); }
+    CHECK(s.p.mode() == PollMode::PING && has_event(s.p.take_events(), "watchdog"), "watchdog forces rejoin after 10 s");
+  }
+  {  // an in-flight write survives a fallback and is retried after rejoin; repeated loss fails it
+    Sim s;
+    s.p.update(s.t);
+    s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
+    CHECK(s.p.request_write(s.t, REG_CH_SETPOINT, 0x2505) == WriteResult::OK, "write accepted");
+    s.p.update(s.t);
+    PollRequest r;
+    CHECK(s.p.armed(&r) && r.is_write(), "write armed");
+    s.fire(); s.t += 100;
+    Frame pres; pres.addr1 = 0x51; pres.addr2 = 0xA1; pres.type = 0x11; pres.sub = 0x11; pres.reg = 0x0020; pres.val = 1;
+    s.t += 2000;
+    s.p.on_board_unsolicited(s.t, pres);
+    CHECK(s.p.mode() == PollMode::PING && s.p.write_active(), "fallback keeps the write queued");
+    s.p.update(s.t);
+    s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
+    CHECK(s.p.mode() == PollMode::FAST && s.p.armed(&r) && r.is_write() && r.val == 0x2505, "write re-sent after rejoin");
+    for (int i = 0; i < 3 && s.p.write_active(); i++) {
+      s.fire(); s.t += 2000;
+      s.p.on_board_unsolicited(s.t, pres);
+      s.p.update(s.t);
+      if (s.p.mode() == PollMode::PING) { s.fire(); s.t += 80; s.answer(1); s.p.update(s.t); }
+    }
+    CHECK(!s.p.write_active() && has_event(s.p.take_events(), "setpoint write 2505 failed"), "repeated loss reports the write failed");
+  }
   {  // display presence: any display request within 5 s, polling idle and writes refused
     Sim s;
     s.p.update(s.t);

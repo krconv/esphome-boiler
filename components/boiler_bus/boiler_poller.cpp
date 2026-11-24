@@ -21,6 +21,7 @@ uint16_t PollScheduler::next() {
 }
 
 void Poller::arm_(const PollRequest &r) {
+  armed_ms_ = now_ms_;
   armed_ = r;
   armed_valid_ = true;
   armed_seq_++;
@@ -62,6 +63,7 @@ bool Poller::on_board_response(uint32_t now, const Frame &f) {
   if (f.reg != inflight_.reg || ack != inflight_.is_write()) return false;
   inflight_valid_ = false;
   misses_ = 0;
+  answered_ms_ = now;
   if (mode_ != PollMode::FAST) {
     mode_ = PollMode::FAST;
     event_("joined: board answers, fast polling");
@@ -97,20 +99,36 @@ bool Poller::on_board_response(uint32_t now, const Frame &f) {
   return true;
 }
 
-void Poller::miss_(uint32_t) {
+// Drop to the ping slot and rejoin. A write in progress stays queued and is retried once rejoined,
+// but each fallback uses up one of its tries so it cannot wait forever.
+void Poller::lose_(uint32_t, const char *why, bool count_write) {
+  mode_ = PollMode::PING;
+  misses_ = 0;
+  inflight_valid_ = false;
+  disarm_();
+  event_(std::string("lost board, rejoining: ") + why);
+  if (count_write && wstate_ != WState::NONE && ++wtries_ >= cfg_.write_tries) fail_write_("board lost, not acknowledged");
+}
+
+void Poller::miss_(uint32_t now) {
   inflight_valid_ = false;
   misses_++;
   const bool was_write = inflight_.is_write();
   const bool was_readback = !was_write && wstate_ == WState::READBACK && inflight_.reg == wreg_;
-  if (mode_ == PollMode::FAST && misses_ >= cfg_.max_misses) {
-    mode_ = PollMode::PING;
-    event_("lost: no answers, back to ping slot");
-  }
   if ((was_write || was_readback) && wstate_ != WState::NONE && ++wtries_ >= cfg_.write_tries)
     fail_write_(was_write ? "not acknowledged (no ack)" : "no read-back");
+  if (mode_ == PollMode::FAST && misses_ >= cfg_.max_misses) lose_(now, "no answers", false);
+}
+
+void Poller::on_board_unsolicited(uint32_t now, const Frame &f) {
+  // the board only sends its 0020 presence frame when no master is talking to it
+  if (mode_ != PollMode::FAST || f.reg != ST_SPARK || !f.from_board()) return;
+  if (now - answered_ms_ < cfg_.presence_guard_ms) return;
+  lose_(now, "board idle (presence frame)", true);
 }
 
 void Poller::update(uint32_t now) {
+  now_ms_ = now;
   if (!is_master(now)) {
     if (had_master_) {
       if (display_present(now)) event_("display present: polling paused");
@@ -128,6 +146,12 @@ void Poller::update(uint32_t now) {
     event_("no display: polling active");
   }
   if (inflight_valid_ && now - sent_ms_ > cfg_.answer_timeout_ms) miss_(now);
+  if (mode_ == PollMode::FAST && now - answered_ms_ > cfg_.watchdog_ms) lose_(now, "watchdog, no answer", true);
+  // an armed request the sampler never sent (no gap found, transmit failed, event dropped): nothing else would re-arm it
+  if (armed_valid_ && now - armed_ms_ > (mode_ == PollMode::FAST ? cfg_.armed_timeout_ms : cfg_.ping_rearm_ms)) {
+    disarm_();
+    if (mode_ == PollMode::FAST) miss_(now);
+  }
   if (wstate_ == WState::WAIT_REPEAT && (int32_t)(now - wrepeat_at_) >= 0) {
     wstate_ = WState::SEND2;
     wtries_ = 0;

@@ -37,6 +37,10 @@ struct PollerConfig {
   uint32_t answer_timeout_ms{250};    // from the moment the request is fired (frame 31 ms + board ~52 ms + reply 31 ms)
   uint32_t max_misses{3};             // consecutive unanswered requests in FAST mode before falling back to PING
   uint32_t write_repeat_ms{13500};    // second write this long after the first ack (the display repeats at ~13.45 s)
+  uint32_t armed_timeout_ms{2000};    // FAST: an armed request that never went out (sampler found no gap) counts as a miss
+  uint32_t ping_rearm_ms{8000};       // PING: re-publish an armed request that was never sent
+  uint32_t watchdog_ms{10000};        // FAST: no answer to us for this long = force a re-join
+  uint32_t presence_guard_ms{1000};   // an unsolicited 0020 only means "board is idle" if we were not answered this recently
   uint32_t write_tries{3};            // unanswered write / read-back attempts per stage before giving up
 };
 
@@ -62,6 +66,7 @@ class Poller {
   // events
   void on_sent(uint32_t now, const PollRequest &fired);          // the sampler transmitted this
   bool on_board_response(uint32_t now, const Frame &f);          // a CRC-valid board response; true if it answered us
+  void on_board_unsolicited(uint32_t now, const Frame &f);       // any board frame that did not answer us
   void update(uint32_t now);                                     // timeouts, arming; call every loop
 
   // write val to a setpoint register (REG_CH_SETPOINT / REG_DHW_SETPOINT); OUT_OF_RANGE for any other register
@@ -76,6 +81,7 @@ class Poller {
   void arm_(const PollRequest &r);
   void disarm_();
   void miss_(uint32_t now);
+  void lose_(uint32_t now, const char *why, bool count_write);
   void fail_write_(const char *why);
   void event_(const std::string &s) { if (events_.size() < 16) events_.push_back(s); }
 
@@ -87,7 +93,8 @@ class Poller {
   uint32_t misses_{0};
   bool armed_valid_{false}, inflight_valid_{false};
   PollRequest armed_, inflight_;
-  uint32_t armed_seq_{0}, sent_ms_{0};
+  uint32_t armed_seq_{0}, sent_ms_{0}, armed_ms_{0}, answered_ms_{0};
+  uint32_t now_ms_{0};
   bool had_master_{false};
 
   WState wstate_{WState::NONE};

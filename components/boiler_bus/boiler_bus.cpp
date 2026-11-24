@@ -512,7 +512,7 @@ void BoilerBus::process_frame_(const QItem &it) {
   this->any_frame_ = true;
   if (this->log_frames_)
     ESP_LOGD(TAG, "%s %s reg=%04X val=%04X", f.from_display() ? "disp>" : "boil>", f.is_request() ? (f.sub == 0x10 ? "WR" : "RD") : (f.sub == 0x10 ? "wr-ack" : "rsp"), f.reg, f.val);
-  if (f.from_board() && f.is_response()) this->poller_.on_board_response(it.t_ms, f);
+  if (f.from_board() && !(f.is_response() && this->poller_.on_board_response(it.t_ms, f))) this->poller_.on_board_unsolicited(it.t_ms, f);
   uint16_t reg;
   if (!this->pairer_.on_frame(f, &reg, &this->counters_.unpaired)) return;
   if (f.sub == 0x10) return;  // write acknowledge (ours or the display's): the poller / read-back handle it, not a value read
@@ -719,7 +719,7 @@ void BoilerBus::poll_tick_(uint32_t now) {
     if (this->display_connected_binary_sensor_) this->display_connected_binary_sensor_->publish_state(disp);
   }
   for (const auto &e : this->poller_.take_events()) {
-    if (e.find("failed") != std::string::npos) ESP_LOGW(TAG, "poll: %s", e.c_str());
+    if (e.find("failed") != std::string::npos || e.find("lost") != std::string::npos) ESP_LOGW(TAG, "poll: %s", e.c_str());
     else ESP_LOGI(TAG, "poll: %s", e.c_str());
     if (this->poll_result_text_sensor_) this->poll_result_text_sensor_->publish_state(e);
   }
