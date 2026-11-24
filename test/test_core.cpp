@@ -1,5 +1,6 @@
 // Host unit tests for components/boiler_bus/boiler_core.*
 // Build: make -C esphome/test   (g++ only; no ESPHome)
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -8,6 +9,7 @@
 #include <sstream>
 
 #include "../components/boiler_bus/boiler_core.h"
+#include "../components/boiler_bus/boiler_poller.h"
 
 using namespace boiler;
 
@@ -424,6 +426,201 @@ static void test_summary() {
   CHECK(std::strstr(out, "w=40us") && std::strstr(out, "dep=200(200-200)mV") && std::strstr(out, "p0=160(160-160)") && std::strstr(out, "p1=320(320-320)"), "summary: %s", out);
 }
 
+
+// ---- 8. write frames, setpoint encoding, poller ------------------------------------
+static bool has_event(const std::vector<std::string> &ev, const char *needle) {
+  for (auto &e : ev)
+    if (e.find(needle) != std::string::npos) return true;
+  return false;
+}
+
+static void test_write_setpoint() {
+  // write request = read request with sub 0x10 and the value filled in; check the ASCII and the CRC on the wire
+  uint8_t b[FRAME_BYTES];
+  encode_frame(make_write_request(0x0101, 0x2505), b);
+  CHECK(b[0] == '\r' && b[1] == 0xA1 && b[2] == 0x51 && b[3] == 0x10 && b[4] == 0x10 && b[17] == '\n', "write header");
+  CHECK(memcmp(b + 5, "01012505", 8) == 0, "write reg/val ascii");
+  CHECK(crc16_xmodem(b + 1, 12) == (uint16_t) strtoul(std::string((char *) b + 13, 4).c_str(), nullptr, 16), "write crc");
+  Frame back;
+  uint8_t bits[FRAME_BITS];
+  for (size_t i = 0; i < FRAME_BITS; i++) bits[i] = (b[i / 8] >> (i % 8)) & 1;
+  CHECK(parse_bits(bits, FRAME_BITS, &back) == ParseStatus::OK && back.sub == 0x10 && back.reg == 0x0101 && back.val == 0x2505 && back.from_display(),
+        "write frame parses back");
+  encode_frame(make_read_request(0x0101), b);
+  CHECK(b[4] == 0x11 && memcmp(b + 9, "0000", 4) == 0, "read stays sub 11, value 0000");
+  CHECK(tx_pulses_safe(tx_frame_pulses(b, TX_DIP_US_FIXED)), "fixed dip width is safe");
+
+  // value encoding from the examples
+  CHECK(encode_setpoint(38.0f) == 0x2600 && encode_setpoint(37.5f) == 0x2505 && encode_setpoint(42.5f) == 0x2A05 && encode_setpoint(43.5f) == 0x2B05,
+        "encode examples");
+  CHECK(decode_setpoint(0x2600) == 38.0f && decode_setpoint(0x2505) == 37.5f && decode_setpoint(0x2A05) == 42.5f && decode_setpoint(0x2B05) == 43.5f,
+        "decode examples");
+  for (int h = 60; h <= 120; h++) {  // every half degree 30.0 .. 60.0 round-trips
+    const float c = h / 2.0f;
+    CHECK(decode_setpoint(encode_setpoint(c)) == c, "round trip %.1f", c);
+    CHECK((encode_setpoint(c) & 0xFF) == ((h & 1) ? 0x05 : 0x00), "low byte %.1f", c);
+  }
+  // rounding to 0.5 and clamping to 30..60
+  CHECK(encode_setpoint(37.7f) == 0x2505 && encode_setpoint(37.8f) == 0x2600 && encode_setpoint(37.3f) == 0x2505 && encode_setpoint(37.24f) == 0x2500, "rounding");
+  CHECK(encode_setpoint(10) == 0x1E00 && encode_setpoint(99) == 0x3C00 && encode_setpoint(-5) == 0x1E00 && encode_setpoint(NAN) == 0x1E00, "clamp");
+  CHECK(setpoint_in_range(30) && setpoint_in_range(60) && setpoint_in_range(45.5f), "in range");
+  CHECK(!setpoint_in_range(29.5f) && !setpoint_in_range(60.5f) && !setpoint_in_range(NAN) && !setpoint_in_range(INFINITY), "out of range");
+}
+
+static void test_scheduler() {
+  auto sc = PollScheduler::defaults();
+  CHECK(sc.fast().size() == 5 && sc.slow().size() == 24, "default lists %zu/%zu", sc.fast().size(), sc.slow().size());
+  // fast registers every pass, slow ones interleaved, every slow register comes round
+  std::map<uint16_t, int> n;
+  std::vector<uint16_t> seq;
+  const int passes = 12;  // 24 slow registers / 5 per pass: full slow cycle within 5 passes
+  for (int i = 0; i < passes * 10; i++) {
+    seq.push_back(sc.next());
+    n[seq.back()]++;
+  }
+  CHECK(seq[0] == 0x0010 && seq[2] == 0x0020 && seq[4] == 0x0033 && seq[6] == 0x0027 && seq[8] == 0x0137 && seq[10] == 0x0010, "fast order");
+  for (uint16_t r : sc.fast()) CHECK(n[r] == passes, "fast reg %04X polled every pass (%d)", r, n[r]);
+  for (uint16_t r : sc.slow()) CHECK(n[r] >= 2 && n[r] <= 3, "slow reg %04X polled %d times", r, n[r]);
+  for (size_t i = 1; i < seq.size(); i += 2) CHECK(std::find(sc.slow().begin(), sc.slow().end(), seq[i]) != sc.slow().end(), "odd slot is slow");
+  PollScheduler only_fast({1, 2}, {});
+  CHECK(only_fast.next() == 1 && only_fast.next() == 2 && only_fast.next() == 1, "no slow list");
+}
+
+// Drives the poller the way the component does: fire whatever is armed, then answer it.
+struct Sim {
+  Poller p;
+  uint32_t t{6000};  // past the boot guard
+  Sim() : p(PollerConfig(), PollScheduler::defaults()) {}
+  bool fire() {  // sampler fires the armed request
+    PollRequest r;
+    if (!p.armed(&r)) return false;
+    p.on_sent(t, r);
+    last = r;
+    return true;
+  }
+  void answer(uint16_t val) {
+    Frame f;
+    f.addr1 = 0x51; f.addr2 = 0xA1; f.type = 0x11; f.sub = last.sub; f.reg = last.reg; f.val = val;
+    p.on_board_response(t, f);
+  }
+  PollRequest last;
+};
+
+static void test_poller() {
+  {  // joining: unanswered pings stay in ping mode, one answer -> fast mode, 3 misses -> back to ping
+    Sim s;
+    s.p.update(s.t);
+    PollRequest r;
+    CHECK(s.p.armed(&r) && r.reg == 0x0010 && !r.is_write() && s.p.mode() == PollMode::PING, "first armed read, ping mode");
+    for (int i = 0; i < 4; i++) {
+      s.fire(); s.t += 400; s.p.update(s.t);
+    }
+    CHECK(s.p.mode() == PollMode::PING, "misses in ping mode keep ping");
+    s.fire(); s.t += 80; s.answer(0x0008); s.p.update(s.t);
+    CHECK(s.p.mode() == PollMode::FAST, "answer -> fast");
+    auto ev = s.p.take_events();
+    CHECK(has_event(ev, "joined"), "join event");
+    for (int i = 0; i < 2; i++) { s.fire(); s.t += 300; s.p.update(s.t); }
+    CHECK(s.p.mode() == PollMode::FAST, "2 misses keep fast");
+    s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);  // an answer resets the count
+    for (int i = 0; i < 2; i++) { s.fire(); s.t += 300; s.p.update(s.t); }
+    CHECK(s.p.mode() == PollMode::FAST, "counter was reset by the answer");
+    s.fire(); s.t += 300; s.p.update(s.t);
+    CHECK(s.p.mode() == PollMode::PING, "3 consecutive misses -> ping");
+    CHECK(has_event(s.p.take_events(), "lost"), "lost event");
+  }
+  {  // a response for another register does not count as an answer
+    Sim s;
+    s.p.update(s.t);
+    s.fire();
+    Frame f; f.addr1 = 0x51; f.addr2 = 0xA1; f.type = 0x11; f.sub = 0x11; f.reg = 0x0099; f.val = 1;
+    CHECK(!s.p.on_board_response(s.t + 50, f) && s.p.mode() == PollMode::PING, "other register ignored");
+  }
+  {  // display presence: any display request within 5 s, polling idle and writes refused
+    Sim s;
+    s.p.update(s.t);
+    PollRequest r;
+    CHECK(s.p.armed(&r), "armed with no display");
+    s.p.on_display_request(s.t + 10);
+    s.p.update(s.t + 20);
+    CHECK(s.p.display_present(s.t + 20) && !s.p.armed(&r), "display -> disarmed");
+    CHECK(s.p.request_write(s.t + 30, 0x2505) == WriteResult::NOT_MASTER, "write refused with display");
+    s.p.update(s.t + 4000);
+    CHECK(!s.p.armed(&r), "still idle at 4 s");
+    s.p.update(s.t + 5100);
+    CHECK(!s.p.display_present(s.t + 5100) && s.p.armed(&r), "back after 5 s of silence");
+    CHECK(s.p.mode() == PollMode::PING, "rejoin via ping slot");
+  }
+  {  // boot guard and the switch
+    Poller p(PollerConfig(), PollScheduler::defaults());
+    PollRequest r;
+    p.update(1000);
+    CHECK(!p.armed(&r) && !p.is_master(1000), "not master in the first 5 s");
+    p.update(5000);
+    CHECK(p.armed(&r), "master after 5 s");
+    p.set_enabled(false);
+    p.update(5100);
+    CHECK(!p.armed(&r) && p.request_write(5100, 0x2505) == WriteResult::NOT_MASTER, "switch off: idle, no writes");
+  }
+  {  // full write: wait for fast mode, ack, repeat after 13.5 s, ack, read back
+    Sim s;
+    s.p.update(s.t);
+    CHECK(s.p.request_write(s.t, 0x2505) == WriteResult::OK, "write accepted");
+    PollRequest r;
+    CHECK(s.p.armed(&r) && !r.is_write(), "ping mode: write waits");
+    s.fire(); s.t += 80; s.answer(0x0A); s.p.update(s.t);  // joined
+    CHECK(s.p.armed(&r) && r.is_write() && r.reg == 0x0101 && r.val == 0x2505, "write armed in fast mode");
+    CHECK(s.p.request_write(s.t, 0x2600) == WriteResult::BUSY, "second write refused while busy");
+    s.fire(); s.t += 5; s.p.update(s.t);
+    CHECK(s.p.armed(&r) && !r.is_write(), "no duplicate write while in flight");
+    s.t += 80; s.answer(0x2505); s.p.update(s.t);
+    CHECK(has_event(s.p.take_events(), "acked, repeating"), "ack event");
+    uint32_t t_ack = s.t;
+    while (s.t < t_ack + 13000) {  // normal polling meanwhile, no writes
+      s.p.update(s.t);
+      CHECK(s.p.armed(&r) && !r.is_write(), "polling during the wait");
+      s.fire(); s.t += 250; s.answer(0); s.p.update(s.t);
+    }
+    while (!(s.p.armed(&r) && r.is_write()) && s.t < t_ack + 15000) { s.t += 50; s.p.update(s.t); if (!s.p.armed(&r) || !r.is_write()) { s.fire(); s.answer(0); } }
+    CHECK(r.is_write() && s.t >= t_ack + 13500, "second write at >= 13.5 s (%u)", s.t - t_ack);
+    s.fire(); s.t += 80; s.answer(0x2505); s.p.update(s.t);
+    CHECK(has_event(s.p.take_events(), "acked twice"), "second ack");
+    CHECK(s.p.armed(&r) && !r.is_write() && r.reg == 0x0101, "read-back armed");
+    s.fire(); s.t += 80; s.answer(0x2505); s.p.update(s.t);
+    CHECK(has_event(s.p.take_events(), "confirmed") && !s.p.write_active(), "read-back confirms");
+  }
+  {  // failures: ack with a different value, no ack, wrong read-back, display appears
+    Sim s;
+    s.p.update(s.t);
+    s.p.request_write(s.t, 0x2505);
+    s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
+    s.fire(); s.t += 80; s.answer(0x2600); s.p.update(s.t);
+    CHECK(has_event(s.p.take_events(), "ack mismatch") && !s.p.write_active(), "ack mismatch fails");
+
+    s.p.request_write(s.t, 0x2505);
+    s.p.update(s.t);
+    for (int i = 0; i < 3 && s.p.write_active(); i++) { s.fire(); s.t += 300; s.p.update(s.t); }
+    CHECK(has_event(s.p.take_events(), "no ack") && !s.p.write_active(), "no ack fails after 3 tries");
+  }
+  {
+    Sim s;
+    s.p.update(s.t);
+    s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
+    s.p.request_write(s.t, 0x2505); s.p.update(s.t);
+    s.p.on_display_request(s.t + 10);
+    s.p.update(s.t + 20);
+    CHECK(has_event(s.p.take_events(), "display appeared") && !s.p.write_active(), "display appearing aborts the write");
+  }
+  {
+    Sim s;
+    s.p.update(s.t);
+    CHECK(s.p.request_write(s.t, 0x2900 + 0x1700) == WriteResult::OUT_OF_RANGE && s.p.request_write(s.t, 0x1D05) == WriteResult::OUT_OF_RANGE &&
+              s.p.request_write(s.t, 0x3C05) == WriteResult::OUT_OF_RANGE,
+          "out-of-range values rejected");
+    CHECK(s.p.request_write(s.t, 0x1E00) == WriteResult::OK, "30.0 accepted");
+  }
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) { fprintf(stderr, "usage: %s frames.log...\n", argv[0]); return 2; }
   printf("[1] captured frames\n");
@@ -440,6 +637,10 @@ int main(int argc, char **argv) {
   test_diag();
   printf("[7] waveform summary\n");
   test_summary();
+  printf("[8] write frames, setpoint, poller\n");
+  test_write_setpoint();
+  test_scheduler();
+  test_poller();
   printf("\nASSERTIONS: %d passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }

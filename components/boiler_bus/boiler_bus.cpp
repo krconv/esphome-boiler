@@ -26,14 +26,12 @@ static constexpr uint32_t RING_N = 8192;            // raw sample ring (power of
 static constexpr size_t TRACE_SAMPLES = 248;
 
 // transmit guards (see boiler_core.h for the pulse limits)
-static constexpr int64_t TX_MIN_SPACING_US = 1000000;  // never more than one transmission per second
-static constexpr float TEST_IDLE_MIN_US = 2000, TEST_IDLE_MAX_US = 8000;  // test pattern: 2..8 ms into the quiet gap
-static constexpr float TEST_SILENT_US = 150000;  // bus silent this long (display unplugged): no traffic to collide with
-static constexpr float REQ_IDLE_MIN_US = 3000, REQ_IDLE_MAX_US = 5000;    // request: 3..5 ms after a board reply (44 ms gap)
+// (the minimum spacing between transmissions is tx_min_spacing_us_, never below 120 ms: the display itself does ~7.7 requests/s)
+static constexpr uint32_t PING_WINDOW_US = 6000;     // ping slot: fire within this long after the configured quiet time
+static constexpr uint32_t FAST_WINDOW_US = 1000000;  // joined: fire any time up to 1 s after the board's reply
 static constexpr uint32_t TX_PROBE_TAIL_US = 6000;        // sample window kept after a test pattern
 static constexpr uint32_t TX_PROBE_TAIL_FRAME_US = 2500;  // ... after a frame (next display request is >= 44 ms after the reply)
 static constexpr float TX_PROBE_MIN_DEPTH = 40.0f;        // counts (~32 mV): a dip must go this far below baseline
-static constexpr uint32_t REQ_SLOT_TIMEOUT_MS = 8000, REQ_LOOPBACK_MS = 400, REQ_RESPONSE_MS = 100;
 static constexpr float DIVIDER_RATIO = 10.0f / 60.0f;      // 10k / (50k + 10k): bus volts -> ADC volts
 
 // ---------------------------------------------------------------------------------------------
@@ -49,7 +47,7 @@ void BoilerBus::setup() {
   this->us_per_sample_ = 1e6f / (float) this->sample_rate_;
   // NB: no gpio_set_direction() after this: it would disconnect the RMT output from the pin
   this->tx_ok_ = this->tx_init_();
-  if (this->tx_last_result_text_sensor_) this->tx_last_result_text_sensor_->publish_state("idle");
+  if (this->poll_result_text_sensor_) this->poll_result_text_sensor_->publish_state("idle");
 
   this->pref_ = global_preferences->make_preference<float>(fnv1_hash("boiler_bus_propane_total"));
   float restored;
@@ -67,7 +65,7 @@ void BoilerBus::setup() {
   }
 }
 
-// RMT drives GPIO32 for the transmit tests: each symbol is {HIGH dip, LOW rest}, durations are fixed in hardware, and
+// RMT drives GPIO32 for requests: each symbol is {HIGH dip, LOW rest}, durations are fixed in hardware, and
 // the channel idles and ends every transmission LOW. If it cannot be set up, the pin stays a plain LOW output.
 bool BoilerBus::tx_init_() {
   rmt_tx_channel_config_t cc = {};
@@ -80,13 +78,13 @@ bool BoilerBus::tx_init_() {
   cc.flags.with_dma = 0;
   cc.flags.init_level = 0;
   if (rmt_new_tx_channel(&cc, &this->tx_chan_) != ESP_OK) {
-    ESP_LOGW(TAG, "RMT channel for GPIO%u failed; transmit tests disabled", this->tx_pin_);
+    ESP_LOGW(TAG, "RMT channel for GPIO%u failed; polling disabled", this->tx_pin_);
     this->tx_chan_ = nullptr;
     return false;
   }
   rmt_copy_encoder_config_t ec = {};
   if (rmt_new_copy_encoder(&ec, &this->tx_enc_) != ESP_OK || rmt_enable(this->tx_chan_) != ESP_OK) {
-    ESP_LOGW(TAG, "RMT encoder/enable failed; transmit tests disabled");
+    ESP_LOGW(TAG, "RMT encoder/enable failed; polling disabled");
     return false;
   }
   this->tx_depths_.reserve(160);
@@ -258,6 +256,7 @@ void BoilerBus::handle_burst_(const boiler::BurstResult &br) {
       this->last_burst_board_ = !own && br.frame.from_board();
       if (!own && esp_timer_get_time() - this->last_ok_trace_us_ > 10000000) this->queue_trace_(br, false, 20);
       QItem it{};
+      it.own = own;
       it.frame = br.frame;
       it.t_ms = millis();
       this->enqueue_(it);
@@ -354,44 +353,30 @@ void BoilerBus::tx_service_(bool drained) {
     return;
   }
   if (!this->tx_ok_ || !drained) return;
-  const bool want_req = this->tx_req_pending_.load();
-  const bool want_test = this->tx_test_on_.load();
-  if (!want_req && !want_test) return;
+  const uint64_t word = this->tx_req_word_.load();
+  if (!(word >> 63)) return;
   if (this->dips_->in_dip()) return;
-  if (now - this->last_tx_us_ < TX_MIN_SPACING_US) return;
+  if (now - this->last_tx_us_ < (int64_t) this->tx_min_spacing_us_.load()) return;
   // quiet time as the sampler sees it; with no dip ever seen it is the time since sampling started
   const uint64_t since = this->bursts_->seen_dip() ? this->bursts_->last_dip_index() : 0;
   const float idle_us = float(this->dips_->index() - since) * this->us_per_sample_;
-
-  if (want_req) {
-    // a 31 ms frame only fits in the ~44 ms gap after a board reply (the gap after a display request is ~21 ms)
-    // (or later, with the display unplugged: see set_tx_req_delay_ms)
-    const float lo = float(this->tx_req_delay_us_.load());
-    const float hi = lo + (REQ_IDLE_MAX_US - REQ_IDLE_MIN_US);
-    if (this->last_burst_board_ && idle_us >= lo && idle_us <= hi) {
-      uint8_t bytes[boiler::FRAME_BYTES];
-      boiler::encode_frame(boiler::make_read_request(this->tx_req_reg_.load()), bytes);
-      auto p = boiler::tx_frame_pulses(bytes, this->tx_dip_us_.load());
-      bool exp = true;
-      if (this->tx_req_pending_.compare_exchange_strong(exp, false)) {  // main loop may have just timed the request out
-        if (this->tx_fire_(p, true, (uint32_t) p.size())) {
-          this->last_tx_us_ = now;
-          QItem it{};
-          it.kind = Kind::TX_SENT;
-          it.t_ms = millis();
-          this->enqueue_(it);
-        }
-      }
-    }
-    return;  // keep the pattern out of the gap a request is waiting for
-  }
-  if (want_test && now - this->last_test_us_ >= TX_MIN_SPACING_US && (idle_us >= TEST_IDLE_MIN_US && idle_us <= TEST_IDLE_MAX_US || idle_us >= TEST_SILENT_US)) {
-    const uint32_t n = this->tx_dip_count_.load();
-    auto p = boiler::tx_test_pattern(n, this->tx_dip_us_.load());
-    if (this->tx_fire_(p, false, n)) {
-      this->last_tx_us_ = this->last_test_us_ = now;
-      this->test_bursts_.fetch_add(1);
-    }
+  // only ever in the gap after a board frame: a 31 ms frame has to end before the board's next one starts
+  if (!this->last_burst_board_ || idle_us < (float) this->tx_req_min_us_.load() || idle_us > (float) this->tx_req_max_us_.load()) return;
+  boiler::Frame f = (word & 0xFF00000000ull) == 0x1000000000ull ? boiler::make_write_request((uint16_t)(word >> 16), (uint16_t) word)
+                                                                : boiler::make_read_request((uint16_t)(word >> 16));
+  uint8_t bytes[boiler::FRAME_BYTES];
+  boiler::encode_frame(f, bytes);
+  auto p = boiler::tx_frame_pulses(bytes, this->tx_dip_us_);
+  uint64_t exp = word;
+  if (!this->tx_req_word_.compare_exchange_strong(exp, 0)) return;  // the main loop replaced or cancelled it meanwhile
+  if (this->tx_fire_(p, true, (uint32_t) p.size())) {
+    this->last_tx_us_ = now;
+    this->tx_count_.fetch_add(1);
+    QItem it{};
+    it.kind = Kind::TX_SENT;
+    it.frame = f;
+    it.t_ms = millis();
+    this->enqueue_(it);
   }
 }
 
@@ -503,7 +488,7 @@ void BoilerBus::loop() {
     }
   }
   const uint32_t now = millis();
-  this->req_tick_(now);
+  this->poll_tick_(now);
   if (now - this->last_tick_ms_ >= 1000) {
     this->tick_(now);
     this->last_tick_ms_ = now;
@@ -517,13 +502,20 @@ void BoilerBus::loop() {
 void BoilerBus::process_frame_(const QItem &it) {
   const boiler::Frame &f = it.frame;
   this->counters_.frames_ok++;
-  if (this->req_ == Req::SENT || this->req_ == Req::WAIT_RESP) this->req_on_frame_(f, it.t_ms);
+  if (it.own) {  // our own request, decoded back: not bus traffic and not a display
+    counters_.frames_ok--;
+    if (this->log_frames_) ESP_LOGD(TAG, "self> %s reg=%04X val=%04X", f.sub == 0x10 ? "WR" : "RD", f.reg, f.val);
+    return;
+  }
+  if (f.from_display() && f.is_request()) this->poller_.on_display_request(it.t_ms);
   this->last_frame_ms_ = it.t_ms;
   this->any_frame_ = true;
   if (this->log_frames_)
     ESP_LOGD(TAG, "%s %s reg=%04X val=%04X", f.from_display() ? "disp>" : "boil>", f.is_request() ? (f.sub == 0x10 ? "WR" : "RD") : (f.sub == 0x10 ? "wr-ack" : "rsp"), f.reg, f.val);
+  if (f.from_board() && f.is_response()) this->poller_.on_board_response(it.t_ms, f);
   uint16_t reg;
   if (!this->pairer_.on_frame(f, &reg, &this->counters_.unpaired)) return;
+  if (f.sub == 0x10) return;  // write acknowledge (ours or the display's): the poller / read-back handle it, not a value read
   if (!boiler::is_known_register(reg)) {
     this->counters_.unknown_regs++;
     if (!this->table_.seen(reg)) {
@@ -659,113 +651,92 @@ void BoilerBus::tick_(uint32_t now) {
   }
 }
 
-// ---- transmit (main loop) --------------------------------------------------------------
-bool BoilerBus::set_tx_register(const std::string &hex) {
-  uint16_t r;
-  if (!boiler::parse_hex_reg(hex, &r)) return false;
-  this->tx_req_reg_.store(r);
-  return true;
+// ---- bus master (main loop) -------------------------------------------------------------
+void BoilerBus::set_polling_enabled(bool on) {
+  this->poller_.set_enabled(on);
+  ESP_LOGI(TAG, "bus polling %s", on ? "on" : "off");
 }
 
-void BoilerBus::req_result_(const char *fmt, ...) {
-  char buf[200];
-  va_list ap;
-  va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
-  va_end(ap);
-  ESP_LOGI(TAG, "TX read %04X: %s", this->req_reg_, buf);
-  if (this->tx_last_result_text_sensor_) this->tx_last_result_text_sensor_->publish_state(buf);
-  this->req_ = Req::IDLE;
+float BoilerBus::ch_setpoint_c() const {
+  const auto *e = this->table_.get(boiler::REG_CH_SETPOINT);
+  return e ? boiler::decode_setpoint(e->val) : NAN;
 }
 
-void BoilerBus::tx_read_register() {
+bool BoilerBus::write_ch_setpoint(float c) {
   const uint32_t now = millis();
-  this->req_reg_ = this->tx_req_reg_.load();
-  if (!this->tx_ok_) return this->req_result_("TX unavailable (RMT setup failed)");
-  if (this->req_ != Req::IDLE) {
-    ESP_LOGW(TAG, "TX read ignored: previous request still in flight");
-    return;
+  if (!boiler::setpoint_in_range(c)) {
+    ESP_LOGW(TAG, "CH setpoint %.1f C refused: outside %.0f..%.0f C", c, boiler::CH_SETPOINT_MIN_C, boiler::CH_SETPOINT_MAX_C);
+    return false;
   }
-  if (this->any_press_ && now - this->last_press_ms_ < 1000) return this->req_result_("ignored: at most one request per second");
-  this->any_press_ = true;
-  this->last_press_ms_ = now;
-  this->req_ = Req::WAIT_SLOT;
-  this->req_press_ms_ = now;
-  this->req_disp_seen_ = this->req_board_seen_ = 0;
-  this->req_display_between_ = false;
-  this->req_seen_.clear();
-  this->tx_req_pending_.store(true);
-  ESP_LOGI(TAG, "TX read %04X: waiting for a quiet gap after a board reply", this->req_reg_);
-  if (this->tx_last_result_text_sensor_) this->tx_last_result_text_sensor_->publish_state("waiting for a gap");
+  const uint16_t val = boiler::encode_setpoint(c);
+  const auto r = this->poller_.request_write(now, val);
+  switch (r) {
+    case boiler::WriteResult::OK:
+      ESP_LOGI(TAG, "CH setpoint write queued: %.1f C = %04X", boiler::decode_setpoint(val), val);
+      if (this->poll_result_text_sensor_) this->poll_result_text_sensor_->publish_state("setpoint write queued");
+      return true;
+    case boiler::WriteResult::NOT_MASTER:
+      ESP_LOGW(TAG, "CH setpoint write refused: %s", this->poller_.enabled() ? "a display is on the bus" : "bus polling is off");
+      break;
+    case boiler::WriteResult::BUSY: ESP_LOGW(TAG, "CH setpoint write refused: previous write still running"); break;
+    default: ESP_LOGW(TAG, "CH setpoint write refused: value out of range"); break;
+  }
+  return false;
+}
+
+void BoilerBus::poll_arm_(const boiler::PollRequest &r, bool valid) {
+  this->tx_req_word_.store(valid ? (1ull << 63) | ((uint64_t) r.sub << 32) | ((uint64_t) r.reg << 16) | r.val : 0);
+}
+
+// ping slot: long quiet time after a board frame, narrow window. joined: the display's short gap, wide window.
+void BoilerBus::poll_timing_() {
+  const bool fast = this->poller_.mode() == boiler::PollMode::FAST;
+  const uint32_t lo = fast ? this->fast_gap_us_ : this->ping_delay_us_;
+  this->tx_req_min_us_.store(lo);
+  this->tx_req_max_us_.store(lo + (fast ? FAST_WINDOW_US : PING_WINDOW_US));
+}
+
+void BoilerBus::poll_tick_(uint32_t now) {
+  if (!this->tx_ok_) return;
+  this->poller_.update(now);
+  const int disp = this->poller_.display_present(now) ? 1 : 0;
+  if (disp != this->last_display_state_) {
+    this->last_display_state_ = disp;
+    if (this->display_connected_binary_sensor_) this->display_connected_binary_sensor_->publish_state(disp);
+  }
+  for (const auto &e : this->poller_.take_events()) {
+    if (e.find("failed") != std::string::npos) ESP_LOGW(TAG, "poll: %s", e.c_str());
+    else ESP_LOGI(TAG, "poll: %s", e.c_str());
+    if (this->poll_result_text_sensor_) this->poll_result_text_sensor_->publish_state(e);
+  }
+  const int mode = (int) this->poller_.mode();
+  if (mode != this->published_mode_) {
+    this->published_mode_ = mode;
+    this->poll_timing_();
+  }
+  if (this->poller_.armed_seq() != this->published_seq_) {
+    this->published_seq_ = this->poller_.armed_seq();
+    boiler::PollRequest r;
+    const bool valid = this->poller_.armed(&r);
+    this->poll_timing_();
+    this->poll_arm_(r, valid);
+  }
 }
 
 void BoilerBus::on_tx_event_(const QItem &it) {
   if (it.kind == Kind::TX_SENT) {
-    if (this->req_ == Req::WAIT_SLOT) {
-      this->req_ = Req::SENT;
-      this->req_sent_ms_ = it.t_ms;
-      ESP_LOGI(TAG, "TX read %04X: request sent", this->req_reg_);
-      if (this->tx_last_result_text_sensor_) this->tx_last_result_text_sensor_->publish_state("sent, waiting for response");
-    }
+    boiler::PollRequest r{it.frame.reg, it.frame.val, it.frame.sub};
+    this->poller_.on_sent(it.t_ms, r);
     return;
   }
   if (it.kind == Kind::TX_DEPTH) {
     if (this->tx_dip_depth_sensor_) this->tx_dip_depth_sensor_->publish_state(it.depth_mv);
     if (this->tx_dip_depth_bus_sensor_) this->tx_dip_depth_bus_sensor_->publish_state(it.depth_mv / 1000.0f / DIVIDER_RATIO);
-    ESP_LOGD(TAG, "TX dips: %u of %u seen, %.0f mV at the ADC", (unsigned) it.found, (unsigned) it.expected, it.depth_mv);
-  }
-}
-
-void BoilerBus::req_on_frame_(const boiler::Frame &f, uint32_t t_ms) {
-  if (this->req_ == Req::SENT) {
-    if (f.from_display() && f.is_request() && f.sub == 0x11 && f.reg == this->req_reg_ && f.val == 0) {
-      this->req_ = Req::WAIT_RESP;
-      this->req_t0_ = t_ms;
-    }
-    return;
-  }
-  if (this->req_seen_.size() < 80) {
-    char t[12];
-    snprintf(t, sizeof(t), "%c%04X ", f.from_display() ? 'D' : (f.from_board() ? 'B' : '?'), f.reg);
-    this->req_seen_ += t;
-  }
-  if (f.from_display()) {
-    this->req_disp_seen_++;
-    this->req_display_between_ = true;
-  } else if (f.from_board() && f.is_response()) {
-    this->req_board_seen_++;
-    if (f.sub == 0x11 && f.reg == this->req_reg_ && t_ms - this->req_t0_ <= REQ_RESPONSE_MS) {
-      this->req_result_("MATCH 51A1 reg=%04X val=%04X after %u ms%s", f.reg, f.val, (unsigned) (t_ms - this->req_t0_),
-                        this->req_display_between_ ? " (a display request came first: may be its own reply)" : "");
-    }
-  }
-}
-
-void BoilerBus::req_tick_(uint32_t now) {
-  switch (this->req_) {
-    case Req::WAIT_SLOT:
-      if (now - this->req_press_ms_ > REQ_SLOT_TIMEOUT_MS) {
-        bool exp = true;
-        if (this->tx_req_pending_.compare_exchange_strong(exp, false))
-          this->req_result_("not sent: no safe gap in %u ms (%s)", (unsigned) REQ_SLOT_TIMEOUT_MS,
-                            this->bus_active_binary_sensor_ && !this->bus_active_binary_sensor_->state ? "bus not active" : "waiting for a board reply gap");
-      }
-      break;
-    case Req::SENT:
-      if (now - this->req_sent_ms_ > REQ_LOOPBACK_MS)
-        this->req_result_("sent, but our own frame was not decoded back (dips too shallow? see TX Dip Depth)");
-      break;
-    case Req::WAIT_RESP:
-      if (now - this->req_t0_ > REQ_RESPONSE_MS)
-        this->req_result_("NO RESPONSE within %u ms (display requests seen: %u, board replies seen: %u: %s)", (unsigned) REQ_RESPONSE_MS,
-                          (unsigned) this->req_disp_seen_, (unsigned) this->req_board_seen_, this->req_seen_.c_str());
-      break;
-    default: break;
   }
 }
 
 void BoilerBus::on_shutdown() {
-  this->tx_test_on_.store(false);
+  this->tx_req_word_.store(0);
   float v = (float) this->propane_total_;
   if (std::fabs(v - this->saved_total_) >= 0.001f) this->pref_.save(&v);
 }
@@ -786,7 +757,7 @@ void BoilerBus::publish_diagnostics_(uint32_t now) {
     this->pub_(this->adc_baseline_sensor_, this->counts_to_mv_(base), now);
     this->pub_(this->dip_depth_sensor_, this->depth_counts_.load() * this->mv_per_count_, now);
   }
-  this->pub_(this->tx_bursts_sensor_, (float) this->test_bursts_.load(), now);
+  this->pub_(this->tx_bursts_sensor_, (float) this->tx_count_.load(), now);
   this->pub_(this->malformed_short_sensor_, (float) this->malformed_short_.load(), now);
   this->pub_(this->malformed_long_sensor_, (float) this->malformed_long_.load(), now);
   this->pub_(this->rejected_dips_sensor_, (float) this->rejected_dips_.load(), now);
@@ -798,10 +769,12 @@ void BoilerBus::publish_diagnostics_(uint32_t now) {
 }
 
 void BoilerBus::dump_config() {
-  ESP_LOGCONFIG(TAG, "Boiler bus (passive display-link decoder):");
+  ESP_LOGCONFIG(TAG, "Boiler bus (display-link decoder and poller):");
   ESP_LOGCONFIG(TAG, "  ADC pin: GPIO%u, %u samples/s, ~%.3f mV/count", this->adc_pin_, (unsigned) this->sample_rate_, this->mv_per_count_);
-  ESP_LOGCONFIG(TAG, "  TX pin: GPIO%u (LOW unless a transmit test runs; RMT %s; HIGH <= %u us per dip, <= %u us total)", this->tx_pin_,
-                this->tx_ok_ ? "ready" : "FAILED", (unsigned) boiler::TX_DIP_US_MAX, (unsigned) boiler::TX_MAX_TOTAL_US);
+  ESP_LOGCONFIG(TAG, "  TX pin: GPIO%u (LOW unless a request is sent; RMT %s; dip %u us, HIGH <= %u us per dip, <= %u us total)", this->tx_pin_,
+                this->tx_ok_ ? "ready" : "FAILED", (unsigned) this->tx_dip_us_, (unsigned) boiler::TX_DIP_US_MAX, (unsigned) boiler::TX_MAX_TOTAL_US);
+  ESP_LOGCONFIG(TAG, "  Poller: ping slot %u ms after a board frame, fast gap %u ms, min interval %u ms", (unsigned) (this->ping_delay_us_ / 1000),
+                (unsigned) (this->fast_gap_us_ / 1000), (unsigned) (this->tx_min_spacing_us_.load() / 1000));
   ESP_LOGCONFIG(TAG, "  Dip depth %.0f mV, threshold %.0f mV (%s)", this->dip_depth_mv_, this->dip_threshold_mv_,
                 this->auto_threshold_ ? "auto-tracks depth" : "fixed");
   ESP_LOGCONFIG(TAG, "  High word of 32-bit counters assumed 0 when unseen: %s", YESNO(this->assume_high_zero_));

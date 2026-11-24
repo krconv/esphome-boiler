@@ -1,4 +1,4 @@
-"""boiler_bus: passive decoder for a boiler's 2-wire display bus (ADC dips -> frames -> registers)."""
+"""boiler_bus: decoder and bus master for a boiler's 2-wire display bus (ADC dips -> frames -> registers; polls when no display is present)."""
 
 import esphome.codegen as cg
 from esphome.components.esp32 import include_builtin_idf_component
@@ -36,6 +36,9 @@ CONF_AUTO_THRESHOLD = "auto_threshold"
 CONF_ASSUME_HIGH_WORD_ZERO = "assume_high_word_zero"
 CONF_LOG_FRAMES = "log_frames"
 CONF_FAN_STALE = "fan_stale_timeout"
+CONF_PING_DELAY = "ping_delay"
+CONF_FAST_GAP = "fast_gap"
+CONF_MIN_INTERVAL = "min_interval"
 
 CAT = ENTITY_CATEGORY_DIAGNOSTIC
 MEAS = STATE_CLASS_MEASUREMENT
@@ -114,13 +117,15 @@ BINARY_SENSORS = {
     "flame": dict(device_class="heat"),
     "dhw_demand": dict(),
     "bus_active": dict(device_class="connectivity", entity_category=CAT),
+    # a display request was decoded in the last 5 s: the poller is idle and writes are refused
+    "display_connected": dict(device_class="connectivity", entity_category=CAT),
 }
 
 TEXT_SENSORS = {
     "state": dict(icon="mdi:state-machine"),
     "status_raw": dict(entity_category=CAT),
     "error_history": dict(icon="mdi:alert-circle-outline"),
-    "tx_last_result": dict(icon="mdi:send-check", entity_category=CAT),
+    "poll_result": dict(icon="mdi:send-check", entity_category=CAT),  # join / loss / setpoint write events
     "malformed_info": dict(icon="mdi:bug-outline", entity_category=CAT),  # latest malformed burst, at most 1 per second
     "malformed_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # ADC trace around the damage, 1 hex digit/sample
     "ok_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # ADC trace inside a good frame, every 10 s
@@ -135,7 +140,7 @@ TEXT_SENSORS = {
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(BoilerBus),
-        # GPIO32: NPN that pulls the bus down. LOW unless a transmit test runs (set_tx_test_enabled / tx_read_register).
+        # GPIO32: NPN that pulls the bus down. LOW unless a request frame is being sent.
         cv.Required(CONF_TX_PIN): pins.internal_gpio_output_pin_number,
         # ADC1 pin (GPIO32-39) behind the divider.
         cv.Required(CONF_ADC_PIN): pins.internal_gpio_input_pin_number,
@@ -150,6 +155,13 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_ASSUME_HIGH_WORD_ZERO, default=True): cv.boolean,
         cv.Optional(CONF_FAN_STALE, default="10s"): cv.positive_time_period_milliseconds,
         cv.Optional(CONF_LOG_FRAMES, default=False): cv.boolean,
+        # poller: quiet time after a board frame when joining (display unplugged; the board's 0020 presence frame
+        # comes every ~3.12 s, a request 3050 ms after it is answered)
+        cv.Optional(CONF_PING_DELAY, default="3050ms"): cv.positive_time_period_milliseconds,
+        # once joined: quiet time after the end of the board's reply before the next request (the display uses ~46 ms)
+        cv.Optional(CONF_FAST_GAP, default="46ms"): cv.positive_time_period_milliseconds,
+        # minimum time between our requests (never below 120 ms; the display does ~130 ms)
+        cv.Optional(CONF_MIN_INTERVAL, default="250ms"): cv.positive_time_period_milliseconds,
         **{cv.Optional(k): sensor.sensor_schema(**v) for k, v in SENSORS.items()},
         **{cv.Optional(k): binary_sensor.binary_sensor_schema(**v) for k, v in BINARY_SENSORS.items()},
         **{cv.Optional(k): text_sensor.text_sensor_schema(**v) for k, v in TEXT_SENSORS.items()},
@@ -159,7 +171,7 @@ CONFIG_SCHEMA = cv.Schema(
 
 async def to_code(config):
     include_builtin_idf_component("esp_adc")  # adc_continuous (DMA) driver
-    include_builtin_idf_component("esp_driver_rmt")  # transmit tests: hardware-timed dips on GPIO32
+    include_builtin_idf_component("esp_driver_rmt")  # hardware-timed request frames on GPIO32
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 
@@ -172,6 +184,9 @@ async def to_code(config):
     cg.add(var.set_assume_high_word_zero(config[CONF_ASSUME_HIGH_WORD_ZERO]))
     cg.add(var.set_fan_stale_ms(config[CONF_FAN_STALE]))
     cg.add(var.set_log_frames(config[CONF_LOG_FRAMES]))
+    cg.add(var.set_ping_delay_ms(config[CONF_PING_DELAY]))
+    cg.add(var.set_fast_gap_ms(config[CONF_FAST_GAP]))
+    cg.add(var.set_min_interval_ms(config[CONF_MIN_INTERVAL]))
 
     for key in SENSORS:
         if key in config:

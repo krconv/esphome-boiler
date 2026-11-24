@@ -414,6 +414,25 @@ Frame make_read_request(uint16_t reg) {
   return f;
 }
 
+Frame make_write_request(uint16_t reg, uint16_t val) {
+  Frame f = make_read_request(reg);
+  f.sub = 0x10;
+  f.val = val;
+  return f;
+}
+
+bool setpoint_in_range(float c) { return std::isfinite(c) && c >= CH_SETPOINT_MIN_C && c <= CH_SETPOINT_MAX_C; }
+
+uint16_t encode_setpoint(float c) {
+  if (!std::isfinite(c)) c = CH_SETPOINT_MIN_C;
+  if (c < CH_SETPOINT_MIN_C) c = CH_SETPOINT_MIN_C;
+  if (c > CH_SETPOINT_MAX_C) c = CH_SETPOINT_MAX_C;
+  const int half = (int) std::floor(c * 2.0f + 0.5f);  // half degrees
+  return uint16_t(((half / 2) << 8) | ((half & 1) ? 0x05 : 0x00));
+}
+
+float decode_setpoint(uint16_t v) { return decode_temp_c(v); }
+
 std::vector<TxPulse> tx_frame_pulses(const uint8_t bytes[FRAME_BYTES], uint32_t dip_us) {
   dip_us = clamp_tx_dip_us(float(dip_us));
   std::vector<TxPulse> p;

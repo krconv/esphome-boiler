@@ -208,6 +208,13 @@ inline float decode_temp_c(uint16_t v) { return float(v >> 8) + float(v & 0xFF) 
 // 32-bit counter whose low word is the even register, high word the odd one.
 inline uint32_t join32(uint16_t hi, uint16_t lo) { return (uint32_t(hi) << 16) | lo; }
 
+// ---- CH setpoint (register 0101): high byte = whole deg C, low byte 0x05 for +0.5, else 0x00 --------
+constexpr float CH_SETPOINT_MIN_C = 30.0f, CH_SETPOINT_MAX_C = 60.0f;
+constexpr uint16_t REG_CH_SETPOINT = 0x0101;
+bool setpoint_in_range(float c);          // finite and within [30, 60]
+uint16_t encode_setpoint(float c);        // clamped to [30, 60], rounded to the nearest 0.5: 38.0 -> 2600, 37.5 -> 2505
+float decode_setpoint(uint16_t v);        // inverse of encode_setpoint (same as decode_temp_c)
+
 // register 0010 bits
 constexpr uint16_t ST_CH_DEMAND = 0x0002;
 constexpr uint16_t ST_PUMP = 0x0008;
@@ -235,6 +242,7 @@ constexpr uint32_t TX_BIT0_PERIOD_US = 160;    // dip-to-dip, display's bit 0
 constexpr uint32_t TX_BIT1_PERIOD_US = 320;    // dip-to-dip, display's bit 1
 constexpr uint32_t TX_MIN_LOW_US = 20;         // keeps the dips distinct and the pin low between them
 constexpr uint32_t TX_DIP_US_DEFAULT = 40;     // display dip width (boiler_sniff.py: "fixed ~40 us dips")
+constexpr uint32_t TX_DIP_US_FIXED = 32;       // dip width we drive: ~40 us on the bus through the NPN stage
 constexpr uint32_t TX_DIP_US_MIN = 10;
 constexpr uint32_t TX_DIP_US_MAX = TX_BIT0_PERIOD_US - TX_MIN_LOW_US;  // 140: stricter than TX_MAX_HIGH_US
 constexpr uint32_t TX_TAIL_LOW_US = 100;       // pin LOW after the last dip
@@ -251,6 +259,7 @@ std::vector<TxPulse> tx_test_pattern(uint32_t n_dips, uint32_t dip_us);
 // 18 raw frame bytes (\r addr addr type sub REG VAL CRC \n) with the CRC filled in
 void encode_frame(const Frame &f, uint8_t out[FRAME_BYTES]);
 Frame make_read_request(uint16_t reg);  // A1 51, type 0x10, sub 0x11, value 0000
+Frame make_write_request(uint16_t reg, uint16_t val);  // A1 51, type 0x10, sub 0x10, value filled in
 // bits LSB-first per byte; first dip is the burst start, every following dip is one bit (160 us = 0, 320 us = 1)
 std::vector<TxPulse> tx_frame_pulses(const uint8_t bytes[FRAME_BYTES], uint32_t dip_us);
 uint32_t tx_pulses_total_us(const std::vector<TxPulse> &p);

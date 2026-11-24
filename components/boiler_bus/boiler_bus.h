@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <string>
 #include <unordered_map>
@@ -11,6 +12,7 @@
 #include "esphome/components/text_sensor/text_sensor.h"
 
 #include "boiler_core.h"
+#include "boiler_poller.h"
 
 #include <vector>
 
@@ -34,8 +36,8 @@ namespace boiler_bus {
   X(frames_per_second) X(frames_ok) X(crc_errors) X(malformed_frames) X(unknown_frames) X(adc_overruns) \
   X(adc_baseline) X(dip_depth) X(bit_period) X(last_frame_age) \
   X(malformed_short) X(malformed_long) X(dip_width) X(rejected_dips) X(tx_dip_depth) X(tx_dip_depth_bus) X(tx_bursts)
-#define BOILER_BINARY_SENSORS(X) X(pump) X(ch_demand) X(spark) X(flame) X(dhw_demand) X(bus_active)
-#define BOILER_TEXT_SENSORS(X) X(state) X(status_raw) X(error_history) X(tx_last_result) X(malformed_info) X(malformed_trace) X(ok_trace) \
+#define BOILER_BINARY_SENSORS(X) X(pump) X(ch_demand) X(spark) X(flame) X(dhw_demand) X(bus_active) X(display_connected)
+#define BOILER_TEXT_SENSORS(X) X(state) X(status_raw) X(error_history) X(poll_result) X(malformed_info) X(malformed_trace) X(ok_trace) \
   X(tx_compare) X(req_compare) X(resp_compare) X(tx_trace) X(req_trace) X(resp_trace)
 
 class BoilerBus : public Component {
@@ -60,21 +62,17 @@ class BoilerBus : public Component {
   void set_fan_stale_ms(uint32_t v) { this->fan_stale_ms_ = v; }
   void set_log_frames(bool v) { this->log_frames_ = v; }
 
-  // ---- transmit test controls (called from HA entities, main loop) ----
+  // ---- bus master (poller); called from the main loop / HA entities ----
   // GPIO32 only ever goes HIGH inside a pulse list that boiler::tx_pulses_safe() accepted.
-  void set_tx_test_enabled(bool on) { this->tx_test_on_.store(on); }
-  void set_tx_dip_us(float us) { this->tx_dip_us_.store(boiler::clamp_tx_dip_us(us)); }
-  // quiet time after the end of a board frame before a read request goes out: 3 ms (old fixed slot), ~46 ms
-  // (where the display starts its next request) or ~3070 ms (just before the board's next 0020 presence frame
-  // when no display is connected, which is where the display's first request after power-up landed)
-  void set_tx_req_delay_ms(float ms) {
-    if (!(ms >= 3.0f)) ms = 3.0f;
-    if (ms > 3200.0f) ms = 3200.0f;
-    this->tx_req_delay_us_.store((uint32_t) (ms * 1000.0f));
-  }
-  void set_tx_dip_count(float n) { this->tx_dip_count_.store(n < 1 ? 1 : (n > 32 ? 32 : (uint32_t) n)); }
-  bool set_tx_register(const std::string &hex);  // false if not 4 hex digits
-  void tx_read_register();                       // one read request, only in a safe gap, at most once per second
+  void set_ping_delay_ms(uint32_t ms) { this->ping_delay_us_ = ms * 1000u; }  // quiet time after a board frame, no display
+  void set_fast_gap_ms(uint32_t ms) { this->fast_gap_us_ = ms * 1000u; }       // quiet time after a board reply, joined
+  void set_min_interval_ms(uint32_t ms) { this->tx_min_spacing_us_.store(std::max<uint32_t>(ms, 120) * 1000u); }
+  void set_polling_enabled(bool on);
+  bool polling_enabled() const { return this->poller_.enabled(); }
+  // Heating setpoint (register 0101) as last read from the boiler (poller or display); NAN until seen
+  float ch_setpoint_c() const;
+  // Queue a write of the heating setpoint. false (and a log line) if refused: out of 30..60 C, display present, polling off, busy.
+  bool write_ch_setpoint(float celsius);
 
   void setup() override;
   void loop() override;
@@ -89,6 +87,7 @@ class BoilerBus : public Component {
     boiler::Frame frame;
     uint32_t t_ms;
     Kind kind{Kind::FRAME};
+    bool own{false};  // FRAME: decoded back from our own transmission (TX_SENT: frame = what was sent)
     float depth_mv{0};
     uint32_t found{0}, expected{0};
     char info[256];
@@ -107,9 +106,9 @@ class BoilerBus : public Component {
   void tx_probe_push_(uint64_t idx, uint16_t x);
   void tx_finish_();
   void on_tx_event_(const QItem &it);
-  void req_tick_(uint32_t now);
-  void req_on_frame_(const boiler::Frame &f, uint32_t t_ms);
-  void req_result_(const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+  void poll_tick_(uint32_t now);
+  void poll_arm_(const boiler::PollRequest &r, bool valid);
+  void poll_timing_();
   void process_frame_(const QItem &it);
   void on_register_(uint16_t reg, uint16_t val, uint32_t now);
   void publish_counter_(uint16_t hi_reg, uint16_t lo_reg, sensor::Sensor *s);
@@ -138,20 +137,20 @@ class BoilerBus : public Component {
   std::atomic<uint32_t> overruns_{0}, crc_errors_{0}, malformed_{0}, queue_drops_{0};
   std::atomic<float> baseline_counts_{0}, depth_counts_{0}, zero_period_us_{0}, width_samples_{0};
   std::atomic<uint32_t> malformed_short_{0}, malformed_long_{0}, rejected_dips_{0}, malformed_info_drops_{0};
-  std::string req_seen_;  // frames decoded while waiting for the response, e.g. "D0010 B0010" (main loop only)
   int64_t last_info_us_{0}, last_ok_trace_us_{0}, last_req_cmp_us_{0}, last_resp_cmp_us_{0};
   uint16_t *ring_{nullptr};  // last RING_N raw ADC samples, for traces
   void queue_trace_(const boiler::BurstResult &br, bool bad, int bitpos, uint32_t sink = 9);
 
   // transmit side. Shared with the main loop: the atomics. Everything else is sampler-task only.
-  std::atomic<bool> tx_test_on_{false}, tx_req_pending_{false};
-  std::atomic<uint32_t> tx_dip_us_{boiler::TX_DIP_US_DEFAULT}, tx_dip_count_{8}, tx_req_delay_us_{3000};
-  std::atomic<uint16_t> tx_req_reg_{0x0033};
+  // tx_req_word_: 0 = nothing armed, else bit 63 | sub << 32 | reg << 16 | val
+  std::atomic<uint64_t> tx_req_word_{0};
+  std::atomic<uint32_t> tx_req_min_us_{3050000}, tx_req_max_us_{3056000}, tx_min_spacing_us_{250000};
+  uint32_t tx_dip_us_{boiler::TX_DIP_US_FIXED};
   rmt_channel_handle_t tx_chan_{nullptr};
   rmt_encoder_handle_t tx_enc_{nullptr};
   bool tx_ok_{false}, tx_active_{false}, tx_is_frame_{false}, tx_swallow_{false};
   std::vector<rmt_symbol_word_t> tx_syms_;
-  int64_t last_tx_us_{-10000000}, last_test_us_{-10000000}, tx_end_us_{0};
+  int64_t last_tx_us_{-10000000}, tx_end_us_{0};
   uint64_t tx_fire_idx_{0}, tx_win_end_{0};
   uint32_t tx_expect_{0};
   float tx_base_{0};
@@ -161,16 +160,14 @@ class BoilerBus : public Component {
   std::vector<float> tx_depths_;
   bool last_burst_board_{false};
   float us_per_sample_{10.0f};
-  std::atomic<uint32_t> test_bursts_{0};
+  std::atomic<uint32_t> tx_count_{0};
 
-  // request tracking (main loop)
-  enum class Req : uint8_t { IDLE, WAIT_SLOT, SENT, WAIT_RESP };
-  Req req_{Req::IDLE};
-  uint16_t req_reg_{0};
-  uint32_t req_press_ms_{0}, req_sent_ms_{0}, req_t0_{0}, req_disp_seen_{0}, req_board_seen_{0};
-  uint32_t last_press_ms_{0};
-  bool any_press_{false};
-  bool req_display_between_{false};
+  // poller (main loop)
+  boiler::Poller poller_{boiler::PollerConfig(), boiler::PollScheduler::defaults()};
+  uint32_t ping_delay_us_{3050000}, fast_gap_us_{46000};
+  uint32_t published_seq_{0};
+  int published_mode_{-1};
+  int last_display_state_{-1};
   static bool IRAM_ATTR on_pool_ovf_(adc_continuous_handle_t, const adc_continuous_evt_data_t *, void *user);
 
   // main-loop side
