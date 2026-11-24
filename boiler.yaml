@@ -84,6 +84,8 @@ boiler_bus:
     name: "Ignition"
   state:
     name: "Status"
+  last_error:
+    name: "Last error"
   error_history:
     name: "Error history"
 
@@ -144,6 +146,9 @@ boiler_bus:
     name: "Bus malformed frames"
   last_frame_age:
     name: "Bus last frame age"
+  # temporary: transmit-while-display-connected experiment (see the Experiment entities below)
+  experiment_result:
+    name: "Experiment result"
 
 # Bus polling: off = listen only. Writes are only sent while polling is on and no display is connected.
 switch:
@@ -157,6 +162,29 @@ switch:
       - lambda: id(boiler_bus_hub).set_polling_enabled(true);
     turn_off_action:
       - lambda: id(boiler_bus_hub).set_polling_enabled(false);
+
+# Experiment (temporary): can we send a request while the display is on the bus? Only with a display present.
+# Set the gap (ms after the end of a board reply), press "Experiment send" (one read of register 0020, then 225 ms of
+# observation), or turn on "Experiment sweep" (gaps 5..40 ms, 3 tries each, one try per 2 s; it turns itself off).
+# Results: "Experiment result" and the log (one frame per 1.5 s at most).
+  - platform: template
+    name: "Experiment sweep"
+    icon: mdi:flask-outline
+    entity_category: config
+    update_interval: 1s
+    lambda: return id(boiler_bus_hub).experiment_sweep_active();
+    turn_on_action:
+      - lambda: id(boiler_bus_hub).experiment_sweep(true);
+    turn_off_action:
+      - lambda: id(boiler_bus_hub).experiment_sweep(false);
+
+button:
+  - platform: template
+    name: "Experiment send"
+    icon: mdi:flask-outline
+    entity_category: config
+    on_press:
+      - lambda: id(boiler_bus_hub).experiment_send();
 
 # Heating (CH) setpoint, register 0101. The state is what the boiler reports, not the last command.
 number:
@@ -176,3 +204,17 @@ number:
       return v;
     set_action:
       - lambda: id(boiler_bus_hub).write_ch_setpoint(x);
+  - platform: template
+    name: "Experiment send gap"
+    icon: mdi:flask-outline
+    entity_category: config
+    unit_of_measurement: "ms"
+    mode: box
+    min_value: 3
+    max_value: 45
+    step: 1
+    initial_value: 20
+    optimistic: true
+    restore_value: false
+    set_action:
+      - lambda: id(boiler_bus_hub).set_experiment_gap_ms(x);

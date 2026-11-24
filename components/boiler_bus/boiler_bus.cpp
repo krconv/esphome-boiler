@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdarg>
+#include <cstring>
 #include <functional>
 
 #include "driver/gpio.h"
@@ -32,6 +33,13 @@ static constexpr uint32_t FAST_WINDOW_US = 1000000;  // joined: fire any time up
 static constexpr uint32_t TX_PROBE_TAIL_US = 6000;        // sample window kept after a test pattern
 static constexpr uint32_t TX_PROBE_TAIL_FRAME_US = 2500;  // ... after a frame (next display request is >= 44 ms after the reply)
 static constexpr float TX_PROBE_MIN_DEPTH = 40.0f;        // counts (~32 mV): a dip must go this far below baseline
+static constexpr uint32_t EXP_RECORD_US = 225000;         // experiment: bursts starting this long after our request are recorded
+static constexpr uint32_t EXP_END_US = 275000;            // ... and the result is sent this long after it (lets the last burst finish)
+static constexpr uint32_t EXP_MIN_SPACING_MS = 1500;      // at most one experiment frame per 1.5 s (sweep: 2 s)
+static constexpr uint32_t EXP_SWEEP_SPACING_MS = 2000;
+static constexpr uint32_t EXP_ARM_TIMEOUT_MS = 1500;     // armed but no usable gap came: give up on this try
+static constexpr uint16_t EXP_REG = 0x0020;
+static_assert(sizeof(boiler::ExpEvent) * boiler::EXP_MAX_EVENTS <= 256, "events must fit a QItem");
 static constexpr float DIVIDER_RATIO = 10.0f / 60.0f;      // 10k / (50k + 10k): bus volts -> ADC volts
 
 // ---------------------------------------------------------------------------------------------
@@ -228,6 +236,7 @@ void BoilerBus::handle_burst_(const boiler::BurstResult &br) {
   using boiler::ParseStatus;
   // a burst that began after we started transmitting is ours (the bus is idle >= 2 ms before we start)
   const bool own = this->tx_active_ && br.start_sample >= this->tx_fire_idx_;
+  if (this->exp_active_ && br.start_sample >= this->exp_fire_idx_) this->exp_record_(br, own);
   const char *label = "";
   if (own && this->tx_is_frame_) {
     char dec[80];
@@ -348,6 +357,7 @@ void BoilerBus::queue_trace_(const boiler::BurstResult &br, bool bad, int bitpos
 // chunks and we only look after draining it, so the real quiet time is >= the measured one.
 void BoilerBus::tx_service_(bool drained) {
   const int64_t now = esp_timer_get_time();
+  this->exp_service_();
   if (this->tx_active_) {
     if (this->dips_->index() >= this->tx_win_end_ || now > this->tx_end_us_ + 50000) this->tx_finish_();
     return;
@@ -376,6 +386,15 @@ void BoilerBus::tx_service_(bool drained) {
     it.kind = Kind::TX_SENT;
     it.frame = f;
     it.t_ms = millis();
+    if (this->exp_pending_.exchange(false)) {  // this was the experiment's request, not the poller's
+      it.own = true;
+      this->exp_active_ = true;
+      this->exp_have_own_ = false;
+      this->exp_n_ = 0;
+      this->exp_fire_idx_ = this->tx_fire_idx_;
+      this->exp_fire_gap_us_ = idle_us;
+      this->exp_end_idx_ = this->tx_fire_idx_ + (uint64_t)(EXP_END_US / this->us_per_sample_);
+    }
     this->enqueue_(it);
   }
 }
@@ -484,11 +503,13 @@ void BoilerBus::loop() {
         if (s) s->publish_state(it.info);
         break;
       }
+      case Kind::EXPERIMENT: this->on_experiment_result_(it); break;
       default: this->on_tx_event_(it); break;
     }
   }
   const uint32_t now = millis();
   this->poll_tick_(now);
+  this->exp_tick_(now);
   if (now - this->last_tick_ms_ >= 1000) {
     this->tick_(now);
     this->last_tick_ms_ = now;
@@ -554,7 +575,7 @@ void BoilerBus::publish_counter_(uint16_t hi_reg, uint16_t lo_reg, sensor::Senso
 }
 
 void BoilerBus::publish_error_history_() {
-  if (!this->error_history_text_sensor_) return;
+  if (!this->error_history_text_sensor_ && !this->last_error_text_sensor_) return;
   uint16_t v[5] = {};
   bool seen[5] = {};
   for (int i = 0; i < 5; i++) {
@@ -564,7 +585,15 @@ void BoilerBus::publish_error_history_() {
   std::string s = boiler::format_error_history(v, seen);
   if (s != this->last_err_) {
     this->last_err_ = s;
-    this->error_history_text_sensor_->publish_state(s);
+    if (this->error_history_text_sensor_) this->error_history_text_sensor_->publish_state(s);
+  }
+  unsigned code;
+  if (this->last_error_text_sensor_ && boiler::last_error_code(v, seen, &code)) {  // E0 = the most recent entry
+    const std::string d = boiler::describe_error(code);
+    if (d != this->last_err_text_) {
+      this->last_err_text_ = d;
+      this->last_error_text_sensor_->publish_state(d);
+    }
   }
 }
 
@@ -725,6 +754,11 @@ void BoilerBus::poll_tick_(uint32_t now) {
 
 void BoilerBus::on_tx_event_(const QItem &it) {
   if (it.kind == Kind::TX_SENT) {
+    if (it.own) {  // the experiment's frame: the poller did not send it
+      this->exp_fired_ = true;
+      this->exp_fired_ms_ = it.t_ms;
+      return;
+    }
     boiler::PollRequest r{it.frame.reg, it.frame.val, it.frame.sub};
     this->poller_.on_sent(it.t_ms, r);
     return;
@@ -733,6 +767,158 @@ void BoilerBus::on_tx_event_(const QItem &it) {
     if (this->tx_dip_depth_sensor_) this->tx_dip_depth_sensor_->publish_state(it.depth_mv);
     if (this->tx_dip_depth_bus_sensor_) this->tx_dip_depth_bus_sensor_->publish_state(it.depth_mv / 1000.0f / DIVIDER_RATIO);
   }
+}
+
+// ---- experiment: transmit while the display is connected ------------------------------------
+// Sampler task: after our request went out, record every burst for EXP_RECORD_US (time relative to the end of the
+// board reply we followed), then hand the list to the main loop, which summarises it.
+void BoilerBus::exp_record_(const boiler::BurstResult &br, bool own) {
+  using boiler::ParseStatus;
+  if (br.status == ParseStatus::NOISE || this->exp_n_ >= boiler::EXP_MAX_EVENTS) return;
+  const float since_fire_us = float(br.start_sample - this->exp_fire_idx_) * this->us_per_sample_;
+  if (since_fire_us > (float) EXP_RECORD_US) return;
+  boiler::ExpEvent e{};
+  e.t_ms = (since_fire_us + this->exp_fire_gap_us_) / 1000.0f;
+  e.ok = br.status == ParseStatus::OK;
+  e.reg = e.ok ? br.frame.reg : 0;
+  if (own && !this->exp_have_own_) {
+    e.kind = 'O';
+    this->exp_have_own_ = true;
+  } else if (e.ok && br.frame.from_board()) {
+    e.kind = 'B';
+  } else if (e.ok && br.frame.from_display() && br.frame.is_request()) {
+    e.kind = 'D';
+  } else {
+    e.kind = 'X';
+  }
+  this->exp_ev_[this->exp_n_++] = e;
+}
+
+void BoilerBus::exp_service_() {
+  if (!this->exp_active_ || this->dips_->index() < this->exp_end_idx_) return;
+  QItem it{};
+  it.kind = Kind::EXPERIMENT;
+  it.t_ms = millis();
+  it.found = (uint32_t) this->exp_n_;
+  it.expected = (uint32_t) this->exp_fire_gap_us_;
+  memcpy(it.info, this->exp_ev_, this->exp_n_ * sizeof(boiler::ExpEvent));
+  this->enqueue_(it);
+  this->exp_active_ = false;
+}
+
+// Main loop. Arms the request; the sampler fires it when the quiet time after a board reply reaches the gap.
+bool BoilerBus::exp_begin_try_(uint32_t now, float gap_ms, bool sweep) {
+  const char *refuse = nullptr;
+  if (!this->tx_ok_) refuse = "transmitter not available";
+  else if (!this->poller_.display_present(now)) refuse = "display not connected (the poller handles that case)";
+  else if (this->exp_try_open_ || this->exp_active_) refuse = "previous try still running";
+  else if (this->exp_ever_ && now - this->exp_last_ms_ < EXP_MIN_SPACING_MS) refuse = "too soon (max one frame per 1.5 s)";
+  if (refuse) {
+    ESP_LOGW(TAG, "experiment refused: %s", refuse);
+    if (this->experiment_result_text_sensor_) this->experiment_result_text_sensor_->publish_state(std::string("refused: ") + refuse);
+    return false;
+  }
+  const uint32_t lo = (uint32_t)(gap_ms * 1000.0f);
+  this->exp_try_open_ = true;
+  this->exp_fired_ = false;
+  this->exp_try_sweep_ = sweep;
+  this->exp_try_gap_ms_ = gap_ms;
+  this->exp_try_ms_ = now;
+  this->exp_last_ms_ = now;
+  this->exp_ever_ = true;
+  this->tx_req_min_us_.store(lo);
+  this->tx_req_max_us_.store(lo + 4000);  // narrow window: a missed gap waits for the next display cycle
+  this->exp_pending_.store(true);
+  this->poll_arm_(boiler::PollRequest{EXP_REG, 0, 0x11}, true);
+  ESP_LOGI(TAG, "experiment armed: read %04X at gap %.0f ms after the next board reply", EXP_REG, gap_ms);
+  return true;
+}
+
+void BoilerBus::exp_cancel_try_(const char *why) {
+  if (!this->exp_try_open_) return;
+  if (this->exp_pending_.exchange(false)) {  // not fired yet
+    this->tx_req_word_.store(0);
+    this->exp_finish_try_("N--", std::string("not sent: ") + why);
+  }
+  // else the sampler already fired: its result arrives shortly
+}
+
+void BoilerBus::exp_finish_try_(const char *code, const std::string &line) {
+  const bool sweep = this->exp_try_sweep_ && this->exp_sweep_on_;
+  this->exp_try_open_ = false;
+  this->exp_fired_ = false;
+  this->poll_timing_();
+  ESP_LOGI(TAG, "experiment: %s", line.c_str());
+  if (!sweep) {
+    if (this->experiment_result_text_sensor_) this->experiment_result_text_sensor_->publish_state(line);
+    return;
+  }
+  this->sweep_.record(code);
+  char p[40];
+  snprintf(p, sizeof(p), "sweep %u/%u: gap %.0f %s", (unsigned) this->sweep_.completed(), (unsigned) this->sweep_.total(), this->exp_try_gap_ms_, code);
+  if (this->experiment_result_text_sensor_) this->experiment_result_text_sensor_->publish_state(p);
+  if (this->sweep_.done()) {
+    this->exp_sweep_on_ = false;
+    const std::string t = this->sweep_.table();
+    ESP_LOGI(TAG, "experiment sweep done (%s): %s", boiler::SweepPlan::legend(), t.c_str());
+    if (this->experiment_result_text_sensor_) this->experiment_result_text_sensor_->publish_state(t);
+  }
+}
+
+void BoilerBus::on_experiment_result_(const QItem &it) {
+  boiler::ExpEvent ev[boiler::EXP_MAX_EVENTS];
+  const size_t n = std::min<size_t>(it.found, boiler::EXP_MAX_EVENTS);
+  memcpy(ev, it.info, n * sizeof(boiler::ExpEvent));
+  const boiler::ExpOutcome o = boiler::summarize_experiment(it.expected / 1000.0f, EXP_REG, ev, n);
+  this->exp_finish_try_(o.code.c_str(), o.line);
+}
+
+void BoilerBus::experiment_send() {
+  if (this->exp_sweep_on_) {
+    ESP_LOGW(TAG, "experiment send refused: sweep running");
+    return;
+  }
+  this->exp_begin_try_(millis(), this->exp_gap_ms_, false);
+}
+
+void BoilerBus::experiment_sweep(bool on) {
+  if (!on) {
+    if (this->exp_sweep_on_) ESP_LOGI(TAG, "experiment sweep stopped: %s", this->sweep_.table().c_str());
+    this->exp_sweep_on_ = false;
+    this->exp_cancel_try_("sweep stopped");
+    return;
+  }
+  if (this->exp_sweep_on_ || this->exp_try_open_) return;
+  if (!this->poller_.display_present(millis())) {
+    ESP_LOGW(TAG, "experiment sweep refused: display not connected");
+    if (this->experiment_result_text_sensor_) this->experiment_result_text_sensor_->publish_state("refused: display not connected");
+    return;
+  }
+  this->sweep_ = boiler::SweepPlan();
+  this->exp_sweep_on_ = true;
+  ESP_LOGI(TAG, "experiment sweep started: gaps 5..40 ms, 3 tries each");
+}
+
+void BoilerBus::exp_tick_(uint32_t now) {
+  if (this->exp_try_open_) {
+    if (!this->poller_.display_present(now)) {
+      this->exp_cancel_try_("display lost");
+    } else if (!this->exp_fired_ && now - this->exp_try_ms_ > EXP_ARM_TIMEOUT_MS) {
+      this->exp_cancel_try_("no usable gap within 1.5 s");
+    } else if (this->exp_fired_ && now - this->exp_fired_ms_ > 1500) {
+      this->exp_finish_try_("N--", "no result from the sampler");  // should not happen
+    }
+  }
+  if (!this->exp_sweep_on_ || this->exp_try_open_) return;
+  if (!this->poller_.display_present(now)) {
+    ESP_LOGW(TAG, "experiment sweep aborted: display lost. Partial: %s", this->sweep_.table().c_str());
+    if (this->experiment_result_text_sensor_)
+      this->experiment_result_text_sensor_->publish_state("sweep aborted (display lost): " + this->sweep_.table());
+    this->exp_sweep_on_ = false;
+    return;
+  }
+  if (this->exp_ever_ && now - this->exp_last_ms_ < EXP_SWEEP_SPACING_MS) return;
+  this->exp_begin_try_(now, (float) this->sweep_.current_gap_ms(), true);
 }
 
 void BoilerBus::on_shutdown() {
