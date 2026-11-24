@@ -64,6 +64,14 @@ class BoilerBus : public Component {
   // GPIO32 only ever goes HIGH inside a pulse list that boiler::tx_pulses_safe() accepted.
   void set_tx_test_enabled(bool on) { this->tx_test_on_.store(on); }
   void set_tx_dip_us(float us) { this->tx_dip_us_.store(boiler::clamp_tx_dip_us(us)); }
+  // quiet time after the end of a board frame before a read request goes out: 3 ms (old fixed slot), ~46 ms
+  // (where the display starts its next request) or ~3070 ms (just before the board's next 0020 presence frame
+  // when no display is connected, which is where the display's first request after power-up landed)
+  void set_tx_req_delay_ms(float ms) {
+    if (!(ms >= 3.0f)) ms = 3.0f;
+    if (ms > 3200.0f) ms = 3200.0f;
+    this->tx_req_delay_us_.store((uint32_t) (ms * 1000.0f));
+  }
   void set_tx_dip_count(float n) { this->tx_dip_count_.store(n < 1 ? 1 : (n > 32 ? 32 : (uint32_t) n)); }
   bool set_tx_register(const std::string &hex);  // false if not 4 hex digits
   void tx_read_register();                       // one read request, only in a safe gap, at most once per second
@@ -137,7 +145,7 @@ class BoilerBus : public Component {
 
   // transmit side. Shared with the main loop: the atomics. Everything else is sampler-task only.
   std::atomic<bool> tx_test_on_{false}, tx_req_pending_{false};
-  std::atomic<uint32_t> tx_dip_us_{boiler::TX_DIP_US_DEFAULT}, tx_dip_count_{8};
+  std::atomic<uint32_t> tx_dip_us_{boiler::TX_DIP_US_DEFAULT}, tx_dip_count_{8}, tx_req_delay_us_{3000};
   std::atomic<uint16_t> tx_req_reg_{0x0033};
   rmt_channel_handle_t tx_chan_{nullptr};
   rmt_encoder_handle_t tx_enc_{nullptr};

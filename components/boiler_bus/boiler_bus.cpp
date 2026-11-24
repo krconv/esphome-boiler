@@ -33,7 +33,7 @@ static constexpr float REQ_IDLE_MIN_US = 3000, REQ_IDLE_MAX_US = 5000;    // req
 static constexpr uint32_t TX_PROBE_TAIL_US = 6000;        // sample window kept after a test pattern
 static constexpr uint32_t TX_PROBE_TAIL_FRAME_US = 2500;  // ... after a frame (next display request is >= 44 ms after the reply)
 static constexpr float TX_PROBE_MIN_DEPTH = 40.0f;        // counts (~32 mV): a dip must go this far below baseline
-static constexpr uint32_t REQ_SLOT_TIMEOUT_MS = 5000, REQ_LOOPBACK_MS = 400, REQ_RESPONSE_MS = 100;
+static constexpr uint32_t REQ_SLOT_TIMEOUT_MS = 8000, REQ_LOOPBACK_MS = 400, REQ_RESPONSE_MS = 100;
 static constexpr float DIVIDER_RATIO = 10.0f / 60.0f;      // 10k / (50k + 10k): bus volts -> ADC volts
 
 // ---------------------------------------------------------------------------------------------
@@ -365,7 +365,10 @@ void BoilerBus::tx_service_(bool drained) {
 
   if (want_req) {
     // a 31 ms frame only fits in the ~44 ms gap after a board reply (the gap after a display request is ~21 ms)
-    if (this->last_burst_board_ && idle_us >= REQ_IDLE_MIN_US && idle_us <= REQ_IDLE_MAX_US) {
+    // (or later, with the display unplugged: see set_tx_req_delay_ms)
+    const float lo = float(this->tx_req_delay_us_.load());
+    const float hi = lo + (REQ_IDLE_MAX_US - REQ_IDLE_MIN_US);
+    if (this->last_burst_board_ && idle_us >= lo && idle_us <= hi) {
       uint8_t bytes[boiler::FRAME_BYTES];
       boiler::encode_frame(boiler::make_read_request(this->tx_req_reg_.load()), bytes);
       auto p = boiler::tx_frame_pulses(bytes, this->tx_dip_us_.load());
