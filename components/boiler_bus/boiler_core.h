@@ -152,6 +152,12 @@ int first_bad_bit(const char *bits);
 // clamped to 0..F. Writes n chars and a NUL.
 void render_trace(const uint16_t *ring, uint32_t mask, uint64_t from, size_t n, float baseline, float depth, char *out);
 
+// One-line waveform description of a burst from the raw ring (dip widths at half depth, depths, dip-to-dip periods,
+// rest level between dips, overshoot above baseline). Same numbers for our own bursts and for the display's / board's,
+// so they can be compared side by side. dip_off are dip start sample offsets from `start`.
+void summarize_burst(const uint16_t *ring, uint32_t mask, uint64_t start, const uint16_t *dip_off, size_t ndips,
+                     float mv_per_count, float us_per_sample, const char *tag, char *out, size_t cap);
+
 // ---- register table and request/response pairing ---------------------------
 struct RegEntry {
   uint16_t val{0};

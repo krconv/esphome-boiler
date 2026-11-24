@@ -1,6 +1,7 @@
 #include "boiler_core.h"
 
 #include <algorithm>
+#include <cstdio>
 
 namespace boiler {
 
@@ -230,6 +231,49 @@ void render_trace(const uint16_t *ring, uint32_t mask, uint64_t from, size_t n, 
     out[i] = H[v < 0 ? 0 : (v > 15 ? 15 : v)];
   }
   out[n] = 0;
+}
+
+void summarize_burst(const uint16_t *ring, uint32_t mask, uint64_t start, const uint16_t *dip_off, size_t ndips,
+                     float mv_per_count, float us_per_sample, const char *tag, char *out, size_t cap) {
+  auto at = [&](int64_t i) { return float(ring[uint64_t(int64_t(start) + i) & mask]); };
+  if (ndips < 3 || start < 60) { snprintf(out, cap, "%s dips=%u (too few)", tag, (unsigned) ndips); return; }
+  float base = 0;
+  for (int i = -40; i < -6; i++) base += at(i);
+  base /= 34.0f;
+  const size_t n = std::min<size_t>(ndips, MAX_TRACK_DIPS);
+  double w_sum = 0, d_sum = 0, d_min = 1e9, d_max = 0, p0_sum = 0, p1_sum = 0, p0_min = 1e9, p0_max = 0, p1_min = 1e9, p1_max = 0;
+  double r0_sum = 0, r1_sum = 0;
+  int w_n = 0, p0_n = 0, p1_n = 0, r0_n = 0, r1_n = 0;
+  float over = 0;
+  for (size_t k = 0; k < n; k++) {
+    const int64_t s = int64_t(dip_off[k]);
+    float mn = 1e9f;
+    for (int j = -1; j <= 12; j++) mn = std::min(mn, at(s + j));
+    const float depth = base - mn;
+    d_sum += depth; d_min = std::min<double>(d_min, depth); d_max = std::max<double>(d_max, depth);
+    const float half = base - depth / 2;
+    int first = -100, last = -100;
+    for (int j = -2; j < 14; j++)
+      if (at(s + j) < half) { if (first == -100) first = j; last = j; }
+    if (first != -100) { w_sum += last - first + 1; w_n++; }
+    for (int j = -2; j < 20; j++) over = std::max(over, at(s + j) - base);
+    if (k + 1 < n) {
+      const int64_t per = int64_t(dip_off[k + 1]) - s;
+      const double pu = per * us_per_sample;
+      if (pu < ZERO_MAX_US) {
+        p0_sum += pu; p0_n++; p0_min = std::min(p0_min, pu); p0_max = std::max(p0_max, pu);
+        if (per >= 12) { for (int j = 8; j < per - 1 && j < 14; j++) { r0_sum += base - at(s + j); r0_n++; } }
+      } else if (pu < ONE_MAX_US) {
+        p1_sum += pu; p1_n++; p1_min = std::min(p1_min, pu); p1_max = std::max(p1_max, pu);
+        for (int j = 8; j < per - 1 && j < 28; j++) { r1_sum += base - at(s + j); r1_n++; }
+      }
+    }
+  }
+  auto avg = [](double s, int c) { return c ? s / c : 0.0; };
+  snprintf(out, cap, "%s dips=%u w=%.0fus dep=%.0f(%.0f-%.0f)mV p0=%.0f(%.0f-%.0f) p1=%.0f(%.0f-%.0f) r0=%.0f r1=%.0f ov=%.0f",
+           tag, (unsigned) ndips, avg(w_sum, w_n) * us_per_sample, avg(d_sum, int(n)) * mv_per_count, d_min * mv_per_count, d_max * mv_per_count,
+           avg(p0_sum, p0_n), p0_n ? p0_min : 0.0, p0_n ? p0_max : 0.0, avg(p1_sum, p1_n), p1_n ? p1_min : 0.0, p1_n ? p1_max : 0.0,
+           avg(r0_sum, r0_n) * mv_per_count, avg(r1_sum, r1_n) * mv_per_count, over * mv_per_count);
 }
 
 // ---- pairing / table ------------------------------------------------------------

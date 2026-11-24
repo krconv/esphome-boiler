@@ -183,6 +183,14 @@ boiler_bus:
     name: "Bus Malformed Trace"
   ok_trace:
     name: "Bus OK Trace"
+  tx_compare:
+    name: "TX Waveform Own"
+  req_compare:
+    name: "TX Waveform Display Request"
+  resp_compare:
+    name: "TX Waveform Board Response"
+  tx_trace:
+    name: "TX Own Trace"
   dip_width:
     name: "ADC Dip Width"
   rejected_dips:

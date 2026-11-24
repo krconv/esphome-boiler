@@ -124,6 +124,10 @@ TEXT_SENSORS = {
     "malformed_info": dict(icon="mdi:bug-outline", entity_category=CAT),  # latest malformed burst, at most 1 per second
     "malformed_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # ADC trace around the damage, 1 hex digit/sample
     "ok_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # ADC trace inside a good frame, every 10 s
+    "tx_compare": dict(icon="mdi:compare", entity_category=CAT),  # waveform summary + decode of our own last frame
+    "req_compare": dict(icon="mdi:compare", entity_category=CAT),  # same summary for a display request (every 2 s)
+    "resp_compare": dict(icon="mdi:compare", entity_category=CAT),  # same summary for a board response (every 2 s)
+    "tx_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # ADC trace inside our own frame (dip 20 onward)
 }
 
 CONFIG_SCHEMA = cv.Schema(

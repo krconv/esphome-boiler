@@ -408,6 +408,22 @@ static void test_diag() {
   CHECK(out[5] == 'A', "dip at idx 3 rendered as A, got %c", out[5]);
 }
 
+static void test_summary() {
+  static uint16_t ring[1024];
+  for (auto &x : ring) x = 2000;
+  uint16_t off[20];
+  int pos = 100;
+  uint64_t start = pos;
+  for (int k = 0; k < 20; k++) {
+    off[k] = uint16_t(pos - start);
+    for (int j = 0; j < 4; j++) ring[(pos + j) & 1023] = 1800;
+    pos += (k % 2) ? 32 : 16;
+  }
+  char out[250];
+  summarize_burst(ring, 1023, start, off, 20, 1.0f, 10.0f, "T", out, sizeof(out));
+  CHECK(std::strstr(out, "w=40us") && std::strstr(out, "dep=200(200-200)mV") && std::strstr(out, "p0=160(160-160)") && std::strstr(out, "p1=320(320-320)"), "summary: %s", out);
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) { fprintf(stderr, "usage: %s frames.log...\n", argv[0]); return 2; }
   printf("[1] captured frames\n");
@@ -422,6 +438,8 @@ int main(int argc, char **argv) {
   test_detector_extras();
   printf("[6] diagnostics\n");
   test_diag();
+  printf("[7] waveform summary\n");
+  test_summary();
   printf("\nASSERTIONS: %d passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }

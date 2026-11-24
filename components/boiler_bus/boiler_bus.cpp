@@ -231,6 +231,29 @@ void BoilerBus::handle_burst_(const boiler::BurstResult &br) {
   // a burst that began after we started transmitting is ours (the bus is idle >= 2 ms before we start)
   const bool own = this->tx_active_ && br.start_sample >= this->tx_fire_idx_;
   const char *label = "";
+  if (own && this->tx_is_frame_) {
+    char dec[80];
+    if (br.status == ParseStatus::OK)
+      snprintf(dec, sizeof(dec), "dec=%02X%02X %02X/%02X reg=%04X val=%04X crc=%04X OK", br.frame.addr1, br.frame.addr2, br.frame.type,
+               br.frame.sub, br.frame.reg, br.frame.val, br.frame.crc);
+    else
+      snprintf(dec, sizeof(dec), "dec=FAIL status=%d nbits=%u", (int) br.status, (unsigned) br.nbits);
+    this->queue_compare_(br, 2, "OWN", dec);
+    this->queue_trace_(br, false, 20, 2);
+  } else if (!own && br.ndips >= 100) {
+    const int64_t t = esp_timer_get_time();
+    if (br.status == ParseStatus::OK && br.frame.from_display() && br.frame.is_request() && t - this->last_req_cmp_us_ > 2000000) {
+      this->last_req_cmp_us_ = t;
+      char x[24];
+      snprintf(x, sizeof(x), "reg=%04X", br.frame.reg);
+      this->queue_compare_(br, 0, "DISP", x);
+    } else if (br.status == ParseStatus::OK && br.frame.from_board() && br.frame.is_response() && t - this->last_resp_cmp_us_ > 2000000) {
+      this->last_resp_cmp_us_ = t;
+      char x[24];
+      snprintf(x, sizeof(x), "reg=%04X", br.frame.reg);
+      this->queue_compare_(br, 1, "BOARD", x);
+    }
+  }
   switch (br.status) {
     case ParseStatus::OK: {
       this->last_burst_board_ = !own && br.frame.from_board();
@@ -273,8 +296,21 @@ void BoilerBus::handle_burst_(const boiler::BurstResult &br) {
   this->enqueue_(it);
 }
 
+void BoilerBus::queue_compare_(const boiler::BurstResult &br, uint32_t sink, const char *tag, const char *extra) {
+  if (!this->ring_ || br.ndips == 0) return;
+  if (this->dips_->index() - br.start_sample > RING_N - 64) return;  // no longer buffered
+  QItem it{};
+  it.kind = Kind::COMPARE;
+  it.found = sink;
+  it.t_ms = millis();
+  char s[200];
+  boiler::summarize_burst(this->ring_, RING_N - 1, br.start_sample, br.dip_off, br.ndips, this->mv_per_count_, this->us_per_sample_, tag, s, sizeof(s));
+  snprintf(it.info, sizeof(it.info), "%s | %s", s, extra);
+  this->enqueue_(it);
+}
+
 // Raw ADC samples around the first damaged byte (bad) or from inside a good frame, as hex digits.
-void BoilerBus::queue_trace_(const boiler::BurstResult &br, bool bad, int bitpos) {
+void BoilerBus::queue_trace_(const boiler::BurstResult &br, bool bad, int bitpos, uint32_t sink) {
   if (!this->ring_ || br.ndips == 0) return;
   size_t k;
   if (bad) {
@@ -291,9 +327,9 @@ void BoilerBus::queue_trace_(const boiler::BurstResult &br, bool bad, int bitpos
   if (now_idx < from + TRACE_SAMPLES || now_idx - from > RING_N - 8) return;  // not buffered (any more)
   QItem it{};
   it.kind = Kind::TRACE;
-  it.found = bad ? 1 : 0;
+  it.found = sink != 9 ? sink : (bad ? 1 : 0);
   it.t_ms = millis();
-  int n = snprintf(it.info, sizeof(it.info), "%c%03d:", bad ? 'b' : 'o', bitpos);
+  int n = snprintf(it.info, sizeof(it.info), "%c%03d:", sink == 2 ? 't' : (bad ? 'b' : 'o'), bitpos);
   boiler::render_trace(this->ring_, RING_N - 1, from, TRACE_SAMPLES, this->dips_->baseline(), this->dips_->depth(), it.info + n);
   this->enqueue_(it);
 }
@@ -438,7 +474,13 @@ void BoilerBus::loop() {
         if (this->malformed_info_text_sensor_) this->malformed_info_text_sensor_->publish_state(it.info);
         break;
       case Kind::TRACE: {
-        auto *s = it.found ? this->malformed_trace_text_sensor_ : this->ok_trace_text_sensor_;
+        auto *s = it.found == 2 ? this->tx_trace_text_sensor_ : (it.found ? this->malformed_trace_text_sensor_ : this->ok_trace_text_sensor_);
+        if (s) s->publish_state(it.info);
+        break;
+      }
+      case Kind::COMPARE: {
+        auto *s = it.found == 2 ? this->tx_compare_text_sensor_ : (it.found == 1 ? this->resp_compare_text_sensor_ : this->req_compare_text_sensor_);
+        ESP_LOGI(TAG, "wave %s", it.info);
         if (s) s->publish_state(it.info);
         break;
       }
