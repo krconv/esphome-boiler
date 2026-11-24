@@ -239,7 +239,6 @@ void BoilerBus::handle_burst_(const boiler::BurstResult &br) {
     else
       snprintf(dec, sizeof(dec), "dec=FAIL status=%d nbits=%u", (int) br.status, (unsigned) br.nbits);
     this->queue_compare_(br, 2, "OWN", dec);
-    this->queue_trace_(br, false, 20, 2);
   } else if (!own && br.ndips >= 100) {
     const int64_t t = esp_timer_get_time();
     if (br.status == ParseStatus::OK && br.frame.from_display() && br.frame.is_request() && t - this->last_req_cmp_us_ > 2000000) {
@@ -299,6 +298,17 @@ void BoilerBus::handle_burst_(const boiler::BurstResult &br) {
 void BoilerBus::queue_compare_(const boiler::BurstResult &br, uint32_t sink, const char *tag, const char *extra) {
   if (!this->ring_ || br.ndips == 0) return;
   if (this->dips_->index() - br.start_sample > RING_N - 64) return;  // no longer buffered
+  {  // raw counts of ~4 dips, starting 4 samples before dip 20
+    const size_t k = std::min<size_t>(br.ndips - 1, 20);
+    const uint64_t from = br.start_sample + br.dip_off[k] - 4;
+    QItem rt{};
+    rt.kind = Kind::TRACE;
+    rt.found = 10 + sink;
+    rt.t_ms = millis();
+    int n = snprintf(rt.info, sizeof(rt.info), "%c:", sink == 2 ? 'T' : (sink == 1 ? 'B' : 'D'));
+    boiler::render_raw(this->ring_, RING_N - 1, from, 80, rt.info + n);
+    this->enqueue_(rt);
+  }
   QItem it{};
   it.kind = Kind::COMPARE;
   it.found = sink;
@@ -474,7 +484,9 @@ void BoilerBus::loop() {
         if (this->malformed_info_text_sensor_) this->malformed_info_text_sensor_->publish_state(it.info);
         break;
       case Kind::TRACE: {
-        auto *s = it.found == 2 ? this->tx_trace_text_sensor_ : (it.found ? this->malformed_trace_text_sensor_ : this->ok_trace_text_sensor_);
+        text_sensor::TextSensor *s;
+        if (it.found >= 10) s = it.found == 12 ? this->tx_trace_text_sensor_ : (it.found == 11 ? this->resp_trace_text_sensor_ : this->req_trace_text_sensor_);
+        else s = it.found ? this->malformed_trace_text_sensor_ : this->ok_trace_text_sensor_;
         if (s) s->publish_state(it.info);
         break;
       }
@@ -678,6 +690,7 @@ void BoilerBus::tx_read_register() {
   this->req_press_ms_ = now;
   this->req_disp_seen_ = this->req_board_seen_ = 0;
   this->req_display_between_ = false;
+  this->req_seen_.clear();
   this->tx_req_pending_.store(true);
   ESP_LOGI(TAG, "TX read %04X: waiting for a quiet gap after a board reply", this->req_reg_);
   if (this->tx_last_result_text_sensor_) this->tx_last_result_text_sensor_->publish_state("waiting for a gap");
@@ -708,6 +721,11 @@ void BoilerBus::req_on_frame_(const boiler::Frame &f, uint32_t t_ms) {
     }
     return;
   }
+  if (this->req_seen_.size() < 80) {
+    char t[12];
+    snprintf(t, sizeof(t), "%c%04X ", f.from_display() ? 'D' : (f.from_board() ? 'B' : '?'), f.reg);
+    this->req_seen_ += t;
+  }
   if (f.from_display()) {
     this->req_disp_seen_++;
     this->req_display_between_ = true;
@@ -736,8 +754,8 @@ void BoilerBus::req_tick_(uint32_t now) {
       break;
     case Req::WAIT_RESP:
       if (now - this->req_t0_ > REQ_RESPONSE_MS)
-        this->req_result_("NO RESPONSE within %u ms (display requests seen: %u, board replies seen: %u)", (unsigned) REQ_RESPONSE_MS,
-                          (unsigned) this->req_disp_seen_, (unsigned) this->req_board_seen_);
+        this->req_result_("NO RESPONSE within %u ms (display requests seen: %u, board replies seen: %u: %s)", (unsigned) REQ_RESPONSE_MS,
+                          (unsigned) this->req_disp_seen_, (unsigned) this->req_board_seen_, this->req_seen_.c_str());
       break;
     default: break;
   }

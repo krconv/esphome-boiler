@@ -191,6 +191,10 @@ boiler_bus:
     name: "TX Waveform Board Response"
   tx_trace:
     name: "TX Own Trace"
+  req_trace:
+    name: "TX Display Request Trace"
+  resp_trace:
+    name: "TX Board Response Trace"
   dip_width:
     name: "ADC Dip Width"
   rejected_dips:

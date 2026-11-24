@@ -247,9 +247,12 @@ void summarize_burst(const uint16_t *ring, uint32_t mask, uint64_t start, const 
   float over = 0;
   for (size_t k = 0; k < n; k++) {
     const int64_t s = int64_t(dip_off[k]);
-    float mn = 1e9f;
-    for (int j = -1; j <= 12; j++) mn = std::min(mn, at(s + j));
-    const float depth = base - mn;
+    float mn = 1e9f, mn2 = 1e9f;  // two lowest samples (one stray low sample must not set the depth)
+    for (int j = -1; j <= 12; j++) {
+      const float v = at(s + j);
+      if (v < mn) { mn2 = mn; mn = v; } else if (v < mn2) { mn2 = v; }
+    }
+    const float depth = base - (mn + mn2) / 2;
     d_sum += depth; d_min = std::min<double>(d_min, depth); d_max = std::max<double>(d_max, depth);
     const float half = base - depth / 2;
     int first = -100, last = -100;
@@ -274,6 +277,17 @@ void summarize_burst(const uint16_t *ring, uint32_t mask, uint64_t start, const 
            tag, (unsigned) ndips, avg(w_sum, w_n) * us_per_sample, avg(d_sum, int(n)) * mv_per_count, d_min * mv_per_count, d_max * mv_per_count,
            avg(p0_sum, p0_n), p0_n ? p0_min : 0.0, p0_n ? p0_max : 0.0, avg(p1_sum, p1_n), p1_n ? p1_min : 0.0, p1_n ? p1_max : 0.0,
            avg(r0_sum, r0_n) * mv_per_count, avg(r1_sum, r1_n) * mv_per_count, over * mv_per_count);
+}
+
+void render_raw(const uint16_t *ring, uint32_t mask, uint64_t from, size_t n, char *out) {
+  static const char H[] = "0123456789ABCDEF";
+  for (size_t i = 0; i < n; i++) {
+    const uint16_t v = ring[(from + i) & mask] & 0xFFF;
+    out[3 * i] = H[v >> 8];
+    out[3 * i + 1] = H[(v >> 4) & 15];
+    out[3 * i + 2] = H[v & 15];
+  }
+  out[3 * n] = 0;
 }
 
 // ---- pairing / table ------------------------------------------------------------

@@ -127,7 +127,9 @@ TEXT_SENSORS = {
     "tx_compare": dict(icon="mdi:compare", entity_category=CAT),  # waveform summary + decode of our own last frame
     "req_compare": dict(icon="mdi:compare", entity_category=CAT),  # same summary for a display request (every 2 s)
     "resp_compare": dict(icon="mdi:compare", entity_category=CAT),  # same summary for a board response (every 2 s)
-    "tx_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # ADC trace inside our own frame (dip 20 onward)
+    "tx_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # raw ADC counts (3 hex digits each) in our own frame, dips 20..23
+    "req_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # same raw dump in a display request
+    "resp_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # same raw dump in a board response
 }
 
 CONFIG_SCHEMA = cv.Schema(

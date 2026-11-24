@@ -36,7 +36,7 @@ namespace boiler_bus {
   X(malformed_short) X(malformed_long) X(dip_width) X(rejected_dips) X(tx_dip_depth) X(tx_dip_depth_bus) X(tx_bursts)
 #define BOILER_BINARY_SENSORS(X) X(pump) X(ch_demand) X(spark) X(flame) X(dhw_demand) X(bus_active)
 #define BOILER_TEXT_SENSORS(X) X(state) X(status_raw) X(error_history) X(tx_last_result) X(malformed_info) X(malformed_trace) X(ok_trace) \
-  X(tx_compare) X(req_compare) X(resp_compare) X(tx_trace)
+  X(tx_compare) X(req_compare) X(resp_compare) X(tx_trace) X(req_trace) X(resp_trace)
 
 class BoilerBus : public Component {
  public:
@@ -130,6 +130,7 @@ class BoilerBus : public Component {
   std::atomic<uint32_t> overruns_{0}, crc_errors_{0}, malformed_{0}, queue_drops_{0};
   std::atomic<float> baseline_counts_{0}, depth_counts_{0}, zero_period_us_{0}, width_samples_{0};
   std::atomic<uint32_t> malformed_short_{0}, malformed_long_{0}, rejected_dips_{0}, malformed_info_drops_{0};
+  std::string req_seen_;  // frames decoded while waiting for the response, e.g. "D0010 B0010" (main loop only)
   int64_t last_info_us_{0}, last_ok_trace_us_{0}, last_req_cmp_us_{0}, last_resp_cmp_us_{0};
   uint16_t *ring_{nullptr};  // last RING_N raw ADC samples, for traces
   void queue_trace_(const boiler::BurstResult &br, bool bad, int bitpos, uint32_t sink = 9);

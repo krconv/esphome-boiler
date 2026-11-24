@@ -152,6 +152,9 @@ int first_bad_bit(const char *bits);
 // clamped to 0..F. Writes n chars and a NUL.
 void render_trace(const uint16_t *ring, uint32_t mask, uint64_t from, size_t n, float baseline, float depth, char *out);
 
+// Raw 12-bit ADC counts ring[(from+i)&mask], i in [0,n), three hex digits each. Writes 3n chars and a NUL.
+void render_raw(const uint16_t *ring, uint32_t mask, uint64_t from, size_t n, char *out);
+
 // One-line waveform description of a burst from the raw ring (dip widths at half depth, depths, dip-to-dip periods,
 // rest level between dips, overshoot above baseline). Same numbers for our own bursts and for the display's / board's,
 // so they can be compared side by side. dip_off are dip start sample offsets from `start`.
