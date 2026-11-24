@@ -11,7 +11,6 @@
 #include "../components/boiler_bus/boiler_core.h"
 #include "../components/boiler_bus/boiler_poller.h"
 #include "../components/boiler_bus/boiler_errors.h"
-#include "../components/boiler_bus/boiler_experiment.h"
 
 using namespace boiler;
 
@@ -623,13 +622,25 @@ static void test_poller() {
   }
 }
 
-// ---- 7. error table + experiment summary --------------------------------------------
-static void test_errors_experiment() {
+// ---- 7. error table --------------------------------------------
+static void test_errors() {
   CHECK(describe_error(0) == "None", "none");
-  CHECK(describe_error(76) == "76 \xE2\x80\x93 Display communication error", "76 %s", describe_error(76).c_str());
-  CHECK(describe_error(54).rfind("54 ", 0) == 0 && describe_error(61).find("Fan") != std::string::npos, "54/61");
+  CHECK(describe_error(76) == "76 \xE2\x80\x93 Control panel communication fault", "76 %s", describe_error(76).c_str());
+  CHECK(describe_error(54) == "54 \xE2\x80\x93 Low heating water pressure", "54");
+  CHECK(describe_error(61) == "61 \xE2\x80\x93 Fan speed sensor fault", "61");
+  CHECK(describe_error(29) == "29 \xE2\x80\x93 Air pressure switch open (check condensate trap)", "29");
+  CHECK(describe_error(10) == "10 \xE2\x80\x93 Flame went out 8 times", "10");
   CHECK(describe_error(99) == "Code 99", "unknown");
+  CHECK(describe_error(12) == "Code 12" && describe_error(14) == "Code 14" && describe_error(71) == "Code 71", "dropped codes");
   CHECK(error_description(11) && !error_description(99), "lookup");
+  {  // all 31 label codes present, nothing else in 1..99
+    static const unsigned label[] = {10, 11, 16, 20, 29, 30, 31, 32, 33, 34, 35, 38, 39, 40, 41, 43, 45, 54, 55, 56, 58, 59, 61, 63, 65, 67, 70, 72, 73, 76, 94};
+    unsigned n = 0;
+    for (unsigned c = 1; c < 100; c++) n += error_description(c) != nullptr;
+    bool all = true;
+    for (unsigned c : label) all = all && error_description(c) != nullptr;
+    CHECK(all && n == sizeof(label) / sizeof(label[0]), "label codes: %u in table", n);
+  }
   // history seen on the bus 11-24 after the 11-20 panel reading: new entries are pushed at the front
   uint16_t h[5] = {0x4C4C, 0x103F, 0x3D36, 0x3636, 0x3600};
   bool seen[5] = {true, true, true, true, true};
@@ -638,34 +649,6 @@ static void test_errors_experiment() {
   CHECK(last_error_code(h, seen, &c) && c == 76, "last 76");
   seen[0] = false;
   CHECK(!last_error_code(h, seen, &c), "unseen");
-
-  // clean case: ours at 20, answered at ~59, display on time would collide -> here it held off
-  ExpEvent a[] = {{20, 'O', true, 0x20}, {59, 'B', true, 0x20}, {107, 'D', true, 0x10}, {146, 'B', true, 0x10}};
-  ExpOutcome o = summarize_experiment(20, 0x20, a, 4);
-  CHECK(o.own_ok && o.answered && !o.collision && o.disp_class == 'd' && o.code == "A.d", "o1 %s", o.code.c_str());
-  ExpEvent b[] = {{40, 'O', true, 0x20}, {47, 'D', true, 0x10}, {86, 'B', true, 0x10}};
-  o = summarize_experiment(40, 0x20, b, 3);
-  CHECK(!o.answered && !o.collision && o.disp_class == 'o' && o.code == "-.o", "o2 %s", o.code.c_str());
-  ExpEvent d[] = {{20, 'O', false, 0}, {170, 'D', true, 0x10}};
-  o = summarize_experiment(20, 0x20, d, 2);
-  CHECK(o.collision && o.disp_class == 's' && o.code == "-Cs", "o3 %s", o.code.c_str());
-  ExpEvent e[] = {{20, 'O', true, 0x20}, {46, 'X', false, 0}, {170, 'D', true, 0x10}};
-  o = summarize_experiment(20, 0x20, e, 3);
-  CHECK(o.collision && !o.disp_ok && o.code == "-Co", "o4 %s", o.code.c_str());
-  o = summarize_experiment(20, 0x20, nullptr, 0);
-  CHECK(o.collision && !o.disp_seen && o.code == "-Cs" && !o.line.empty(), "o5 %s", o.code.c_str());
-  // a reply to some other register does not count as an answer
-  ExpEvent f[] = {{20, 'O', true, 0x20}, {59, 'B', true, 0x33}, {106, 'D', true, 0x10}};
-  CHECK(!summarize_experiment(20, 0x20, f, 3).answered, "other reg");
-
-  SweepPlan sp;
-  CHECK(sp.total() == 24 && !sp.done() && sp.current_gap_ms() == 5, "plan");
-  for (int i = 0; i < 3; i++) sp.record("A.o");
-  CHECK(sp.current_gap_ms() == 10, "next gap");
-  sp.record("N--");
-  CHECK(sp.table() == "5:A.o,A.o,A.o 10:N--", "table %s", sp.table().c_str());
-  while (!sp.done()) sp.record("-.o");
-  CHECK(sp.completed() == 24 && sp.current_gap_ms() == 0 && sp.table().size() < 255, "done %zu", sp.table().size());
 }
 
 int main(int argc, char **argv) {
@@ -688,8 +671,8 @@ int main(int argc, char **argv) {
   test_write_setpoint();
   test_scheduler();
   test_poller();
-  printf("[9] error table, experiment summary\n");
-  test_errors_experiment();
+  printf("[9] error table\n");
+  test_errors();
   printf("\nASSERTIONS: %d passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }

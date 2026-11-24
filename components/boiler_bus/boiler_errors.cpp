@@ -7,28 +7,39 @@ struct Entry {
   unsigned code;
   const char *text;
 };
-// Sources: Noritz CB199-DV Owner's Guide p.34 (11, 29, 40, 45, 54) and Install manual (54 shown at the start of auto-fill);
-// help.noritz.com error-code pages (12, 14, 16, 20, 61, 63, 67, 71, 73, 76, 90, 91, 94) for the tankless/Pro line, which
-// shares the control family. The other codes are not published for the CB199.
+// Source: the error-code label inside this boiler's cabinet (photo, 2026-11-24).
 const Entry TABLE[] = {
-    {11, "Ignition failure"},
-    {12, "Flame loss"},
-    {14, "Heat exchanger overheat"},
-    {16, "Outlet water too hot"},
+    {10, "Flame went out 8 times"},
+    {11, "Ignition failed 10 times"},
+    {16, "Overheat during hot water"},
     {20, "High-limit switch tripped"},
-    {29, "Air pressure / condensate drain blocked"},
+    {29, "Air pressure switch open (check condensate trap)"},
+    {30, "Outdoor sensor fault"},
+    {31, "Inlet water sensor fault"},
+    {32, "Hot water sensor fault"},
+    {33, "Outlet water sensor fault"},
+    {34, "Return water sensor fault"},
+    {35, "Exhaust sensor fault"},
+    {38, "Memory (EEPROM) fault"},
+    {39, "Flame after shutdown"},
     {40, "Gas leak detected"},
-    {45, "Water leak inside unit"},
+    {41, "Flue blocked"},
+    {43, "Burner overheat switch tripped"},
+    {45, "Water leak detected"},
     {54, "Low heating water pressure"},
-    {61, "Fan motor abnormality"},
-    {63, "Recirculation abnormality"},
-    {67, "AGM abnormality"},
-    {71, "Gas valve abnormality"},
-    {73, "Circuit board setting error"},
-    {76, "Display communication error"},
-    {90, "Combustion abnormality"},
-    {91, "Wrong gas type setting"},
-    {94, "Exhaust temperature abnormality"},
+    {55, "Refill stopped (pressure not rising)"},
+    {56, "High heating water pressure"},
+    {58, "Low water cutoff tripped"},
+    {59, "Pressure sensor fault"},
+    {61, "Fan speed sensor fault"},
+    {63, "Overheat during heating"},
+    {65, "Water valve fault"},
+    {67, "Gas/air mixer fault"},
+    {70, "Control board self-check fault"},
+    {72, "Flame signal before ignition"},
+    {73, "DIP switch setting fault"},
+    {76, "Control panel communication fault"},
+    {94, "Exhaust overheat"},
 };
 }  // namespace
 

@@ -9,7 +9,7 @@ namespace boiler {
 
 // Short description, or nullptr when the code is not in the table.
 const char *error_description(unsigned code);
-// "None" for 0, "76 – Display communication error", or "Code 99" for an unknown code.
+// "None" for 0, "76 – Control panel communication fault", or "Code 99" for an unknown code.
 std::string describe_error(unsigned code);
 // E0 = hi byte of register 0142. false while 0142 has not been seen.
 bool last_error_code(const uint16_t *vals, const bool *seen, unsigned *code);

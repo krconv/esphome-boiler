@@ -14,7 +14,6 @@
 #include "boiler_core.h"
 #include "boiler_poller.h"
 #include "boiler_errors.h"
-#include "boiler_experiment.h"
 
 #include <vector>
 
@@ -39,7 +38,7 @@ namespace boiler_bus {
   X(adc_baseline) X(dip_depth) X(bit_period) X(last_frame_age) \
   X(malformed_short) X(malformed_long) X(dip_width) X(rejected_dips) X(tx_dip_depth) X(tx_dip_depth_bus) X(tx_bursts)
 #define BOILER_BINARY_SENSORS(X) X(pump) X(ch_demand) X(spark) X(flame) X(dhw_demand) X(bus_active) X(display_connected)
-#define BOILER_TEXT_SENSORS(X) X(state) X(status_raw) X(error_history) X(last_error) X(experiment_result) X(poll_result) X(malformed_info) X(malformed_trace) X(ok_trace) \
+#define BOILER_TEXT_SENSORS(X) X(state) X(status_raw) X(error_history) X(last_error) X(poll_result) X(malformed_info) X(malformed_trace) X(ok_trace) \
   X(tx_compare) X(req_compare) X(resp_compare) X(tx_trace) X(req_trace) X(resp_trace)
 
 class BoilerBus : public Component {
@@ -76,15 +75,6 @@ class BoilerBus : public Component {
   // Queue a write of the heating setpoint. false (and a log line) if refused: out of 30..60 C, display present, polling off, busy.
   bool write_ch_setpoint(float celsius);
 
-  // ---- experiment: transmit while a display is connected (diagnostic; main loop / HA entities) ----
-  // One read request of register 0020 at `gap` ms after the end of a board reply, then 225 ms of observation.
-  // Refused (with a log line) unless a display is present; at most one frame per 1.5 s; the pulse safety cap still applies.
-  void set_experiment_gap_ms(float ms) { this->exp_gap_ms_ = std::min(45.0f, std::max(3.0f, ms)); }
-  float experiment_gap_ms() const { return this->exp_gap_ms_; }
-  void experiment_send();
-  void experiment_sweep(bool on);
-  bool experiment_sweep_active() const { return this->exp_sweep_on_; }
-
   void setup() override;
   void loop() override;
   void dump_config() override;
@@ -93,7 +83,7 @@ class BoilerBus : public Component {
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
  protected:
-  enum class Kind : uint8_t { FRAME, MALFORMED, TX_DEPTH, TX_SENT, TRACE, COMPARE, EXPERIMENT };
+  enum class Kind : uint8_t { FRAME, MALFORMED, TX_DEPTH, TX_SENT, TRACE, COMPARE };
   struct QItem {
     boiler::Frame frame;
     uint32_t t_ms;
@@ -121,13 +111,6 @@ class BoilerBus : public Component {
   void poll_arm_(const boiler::PollRequest &r, bool valid);
   void poll_timing_();
   void process_frame_(const QItem &it);
-  void exp_tick_(uint32_t now);
-  bool exp_begin_try_(uint32_t now, float gap_ms, bool sweep);
-  void exp_cancel_try_(const char *why);
-  void exp_finish_try_(const char *code, const std::string &line);
-  void on_experiment_result_(const QItem &it);
-  void exp_service_();  // sampler task
-  void exp_record_(const boiler::BurstResult &br, bool own);  // sampler task
   void on_register_(uint16_t reg, uint16_t val, uint32_t now);
   void publish_counter_(uint16_t hi_reg, uint16_t lo_reg, sensor::Sensor *s);
   void publish_error_history_();
@@ -179,19 +162,6 @@ class BoilerBus : public Component {
   bool last_burst_board_{false};
   float us_per_sample_{10.0f};
   std::atomic<uint32_t> tx_count_{0};
-
-  // experiment. Sampler task: exp_active_ .. exp_ev_. Main loop: the rest. exp_pending_ is the hand-off.
-  std::atomic<bool> exp_pending_{false};  // main loop armed the experiment request; cleared by whoever consumes it
-  bool exp_active_{false}, exp_have_own_{false};
-  uint64_t exp_fire_idx_{0}, exp_end_idx_{0};
-  float exp_fire_gap_us_{0};
-  size_t exp_n_{0};
-  boiler::ExpEvent exp_ev_[boiler::EXP_MAX_EVENTS];
-  float exp_gap_ms_{20.0f}, exp_try_gap_ms_{0};
-  bool exp_try_open_{false}, exp_fired_{false}, exp_sweep_on_{false}, exp_try_sweep_{false};
-  uint32_t exp_try_ms_{0}, exp_last_ms_{0}, exp_fired_ms_{0};
-  bool exp_ever_{false};
-  boiler::SweepPlan sweep_;
 
   // poller (main loop)
   boiler::Poller poller_{boiler::PollerConfig(), boiler::PollScheduler::defaults()};
