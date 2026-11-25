@@ -431,10 +431,10 @@ interval:
   - interval: 5s
     then:
       - lambda: |-
-          auto &hub = id(boiler_bus_hub);
-          float v = hub.read_field(0x000B, 0x0080);
+          auto *hub = id(boiler_bus_hub);
+          float v = hub->read_field(0x000B, 0x0080);
           if (!std::isnan(v)) id(sw_outdoor_reset).publish_state(v > 0);
-          v = hub.read_field(0x0121, 0x0008);
+          v = hub->read_field(0x0121, 0x0008);
           if (!std::isnan(v)) id(sw_preheat_enabled).publish_state(v > 0);
-          v = hub.read_field(0x0009, 0x0200);
+          v = hub->read_field(0x0009, 0x0200);
           if (!std::isnan(v)) id(sw_preheat).publish_state(v > 0);
