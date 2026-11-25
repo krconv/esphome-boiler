@@ -106,6 +106,12 @@ boiler_bus:
   error_history:
     name: "Error history"
     entity_category: diagnostic
+  register_changes:
+    name: "Register Changes"
+    entity_category: diagnostic
+  registers_seen:
+    name: "Registers Seen"
+    entity_category: diagnostic
 
   # temperatures
   supply_temperature:

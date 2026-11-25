@@ -131,6 +131,8 @@ TEXT_SENSORS = {
     "malformed_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # ADC trace around the damage, 1 hex digit/sample
     "ok_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # ADC trace inside a good frame, every 10 s
     "tx_compare": dict(icon="mdi:compare", entity_category=CAT),  # waveform summary + decode of our own last frame
+    "register_changes": dict(icon="mdi:swap-horizontal", entity_category=CAT),  # one line per bus write / changed or new register
+    "registers_seen": dict(icon="mdi:format-list-numbered", entity_category=CAT),  # distinct registers read or written since boot
     "req_compare": dict(icon="mdi:compare", entity_category=CAT),  # same summary for a display request (every 2 s)
     "resp_compare": dict(icon="mdi:compare", entity_category=CAT),  # same summary for a board response (every 2 s)
     "tx_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # raw ADC counts (3 hex digits each) in our own frame, dips 20..23

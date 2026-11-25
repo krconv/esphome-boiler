@@ -488,6 +488,7 @@ void BoilerBus::loop() {
     }
   }
   const uint32_t now = millis();
+  this->regchg_publish_(now);
   this->poll_tick_(now);
   if (now - this->last_tick_ms_ >= 1000) {
     this->tick_(now);
@@ -496,6 +497,83 @@ void BoilerBus::loop() {
   if (now - this->last_diag_ms_ >= DIAG_MS) {
     this->publish_diagnostics_(now);
     this->last_diag_ms_ = now;
+  }
+}
+
+// Fast-changing measurements, counters and status: not worth a line when they change. Everything else (setpoints,
+// unmapped / installer registers, error history) is reported. See register_map.md.
+static bool regchg_skip_(uint16_t r) {
+  switch (r) {
+    case 0x0010:                                                          // status bit-field
+    case 0x0020: case 0x0021: case 0x0022: case 0x0023: case 0x0024:      // temperatures
+    case 0x0130:                                                          // temperature
+    case 0x0027: case 0x0033: case 0x0132: case 0x0137:                   // flow, fan rpm, pressure, flame sensor
+    case 0x0091: case 0x0092: case 0x0093: case 0x0094: case 0x0095: case 0x0096: case 0x0098: case 0x0099:  // hour / ignition counters
+    case 0x0133: case 0x0134: case 0x0135: case 0x0136:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static constexpr size_t REGCHG_MAX_QUEUE = 48;
+static constexpr uint32_t REGCHG_INTERVAL_MS = 500;  // at most 2 published lines per second
+
+void BoilerBus::regchg_event_(bool is_write, const char *fmt, ...) {
+  RegEvent e;
+  e.is_write = is_write;
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(e.text, sizeof(e.text), fmt, ap);
+  va_end(ap);
+  ESP_LOGI("regchg", "%s", e.text);
+  if (this->regchg_q_.size() >= REGCHG_MAX_QUEUE) {
+    // overflow: drop the oldest change event; writes only go if nothing else is left
+    auto victim = std::find_if(this->regchg_q_.begin(), this->regchg_q_.end(), [](const RegEvent &x) { return !x.is_write; });
+    if (victim == this->regchg_q_.end()) victim = this->regchg_q_.begin();
+    this->regchg_q_.erase(victim);
+  }
+  this->regchg_q_.push_back(e);
+}
+
+void BoilerBus::regchg_on_frame_(const boiler::Frame &f) {
+  if (!this->register_changes_text_sensor_ && !this->registers_seen_text_sensor_) return;
+  if (this->regs_seen_.insert(f.reg).second) this->regs_seen_dirty_ = true;
+  if (f.sub == 0x10) {  // write request (display) or its acknowledge / echo (board)
+    this->regchg_event_(true, "W %04X %04X (%s)", f.reg, f.val, f.from_display() ? "disp" : "brd");
+    return;
+  }
+  if (!(f.sub == 0x11 && f.is_response() && f.from_board()) || regchg_skip_(f.reg)) return;
+  auto it = this->regchg_last_.find(f.reg);
+  if (it == this->regchg_last_.end()) {
+    this->regchg_last_[f.reg] = f.val;
+    this->regchg_event_(false, "N %04X %04X", f.reg, f.val);
+  } else if (it->second != f.val) {
+    const uint16_t old = it->second;
+    it->second = f.val;
+    this->regchg_event_(false, "R %04X %04X\xE2\x86\x92%04X", f.reg, old, f.val);
+  }
+}
+
+void BoilerBus::regchg_publish_(uint32_t now) {
+  if (!this->regchg_q_.empty() && now - this->regchg_last_pub_ms_ >= REGCHG_INTERVAL_MS) {
+    this->regchg_last_pub_ms_ = now;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "#%u %s", (unsigned) ++this->regchg_seq_, this->regchg_q_.front().text);
+    this->regchg_q_.pop_front();
+    if (this->register_changes_text_sensor_) this->register_changes_text_sensor_->publish_state(buf);
+  }
+  if (this->regs_seen_dirty_ && now - this->regs_seen_last_ms_ >= 1000) {
+    this->regs_seen_last_ms_ = now;
+    this->regs_seen_dirty_ = false;
+    std::string s;
+    for (uint16_t r : this->regs_seen_) {
+      char b[8];
+      snprintf(b, sizeof(b), "%s%04X", s.empty() ? "" : ",", r);
+      if (s.size() + strlen(b) > 255) break;
+      s += b;
+    }
+    if (this->registers_seen_text_sensor_) this->registers_seen_text_sensor_->publish_state(s);
   }
 }
 
@@ -508,6 +586,7 @@ void BoilerBus::process_frame_(const QItem &it) {
     return;
   }
   if (f.from_display() && f.is_request()) this->poller_.on_display_request(it.t_ms);
+  this->regchg_on_frame_(f);
   this->last_frame_ms_ = it.t_ms;
   this->any_frame_ = true;
   if (this->log_frames_)

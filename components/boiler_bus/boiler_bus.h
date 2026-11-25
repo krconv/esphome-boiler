@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <deque>
+#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -39,7 +41,7 @@ namespace boiler_bus {
   X(malformed_short) X(malformed_long) X(dip_width) X(rejected_dips) X(tx_dip_depth) X(tx_dip_depth_bus) X(tx_bursts)
 #define BOILER_BINARY_SENSORS(X) X(pump) X(ch_demand) X(spark) X(flame) X(dhw_demand) X(bus_active) X(display_connected)
 #define BOILER_TEXT_SENSORS(X) X(state) X(status_raw) X(error_history) X(last_error) X(poll_result) X(malformed_info) X(malformed_trace) X(ok_trace) \
-  X(tx_compare) X(req_compare) X(resp_compare) X(tx_trace) X(req_trace) X(resp_trace)
+  X(register_changes) X(registers_seen) X(tx_compare) X(req_compare) X(resp_compare) X(tx_trace) X(req_trace) X(resp_trace)
 
 class BoilerBus : public Component {
  public:
@@ -121,6 +123,19 @@ class BoilerBus : public Component {
   bool write_setpoint_(uint16_t reg, float celsius);
   void tick_(uint32_t now);
   void publish_diagnostics_(uint32_t now);
+  // register-change diagnostic (main loop only): events are queued in process_frame_, published from loop()
+  void regchg_event_(bool is_write, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+  void regchg_on_frame_(const boiler::Frame &f);
+  void regchg_publish_(uint32_t now);
+  struct RegEvent {
+    bool is_write;
+    char text[40];
+  };
+  std::deque<RegEvent> regchg_q_;
+  std::unordered_map<uint16_t, uint16_t> regchg_last_;
+  std::set<uint16_t> regs_seen_;
+  bool regs_seen_dirty_{false};
+  uint32_t regchg_seq_{0}, regchg_last_pub_ms_{0}, regs_seen_last_ms_{0};
   void pub_(sensor::Sensor *s, float v, uint32_t now);
   void pub_text_(text_sensor::TextSensor *s, const std::string &v);
   float counts_to_mv_(float counts) const;
