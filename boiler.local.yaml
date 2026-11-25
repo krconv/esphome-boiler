@@ -173,6 +173,46 @@ time:
     id: ha_time
 
 sensor:
+  - platform: dallas_temp
+    address: 0xda000000db070028
+    name: "Probe 1"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0xa9000000db97d028
+    name: "Probe 2"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0x46000000da8dd828
+    name: "Probe 3"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0x7f000000dc2f7c28
+    name: "Probe 4"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0x79000000d8fafe28
+    name: "Probe 5"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0xc4000000db7bd928
+    name: "Probe 6"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0x66000000dc0c0d28
+    name: "Probe 7"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0x30000000dc0deb28
+    name: "Probe 8"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0x56000000dc3d2728
+    name: "Probe 9"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0xf5000000db81af28
+    name: "Probe 10"
+    update_interval: 5s
   - platform: copy
     source_id: propane_used
     name: "Propane gas used"
