@@ -44,7 +44,13 @@ class PollScheduler {
 };
 
 struct PollerConfig {
-  uint32_t display_timeout_ms{5000};  // a display request this recent = display present
+  uint32_t display_timeout_ms{5000};  // a confirmed display stays present this long after its last request
+  // A display is only believed after display_confirm_count requests within display_confirm_window_ms (the real one asks ~8x/s;
+  // a lone display-addressed frame happens on an empty bus about every 10 s). Our own request seen back is never evidence.
+  uint32_t display_confirm_count{3};
+  uint32_t display_confirm_window_ms{2000};
+  uint32_t echo_window_ms{500};       // a display-looking request equal to the one we just sent is our own echo
+  uint32_t write_timeout_ms{90000};   // a write not finished this long after it was requested is abandoned (and reported)
   uint32_t answer_timeout_ms{250};    // from the moment the request is fired (frame 31 ms + board ~52 ms + reply 31 ms)
   uint32_t max_misses{3};             // consecutive unanswered requests in FAST mode before falling back to PING
   uint32_t write_repeat_ms{13500};    // second write this long after the first ack (the display repeats at ~13.45 s)
@@ -64,7 +70,11 @@ class Poller {
 
   void set_enabled(bool on) { enabled_ = on; }
   bool enabled() const { return enabled_; }
-  void on_display_request(uint32_t now) { last_disp_ms_ = now; seen_disp_ = true; }
+  enum class DispEvidence : uint8_t { ECHO, STRAY, CONFIRMED, PRESENT };
+  // A display-addressed request was heard. `req` (when known) lets our own echo be told from a real display.
+  DispEvidence on_display_request(uint32_t now, const PollRequest *req = nullptr);
+  uint32_t display_echoes() const { return echoes_; }
+  uint32_t display_strays() const { return strays_; }
   bool display_present(uint32_t now) const { return seen_disp_ && now - last_disp_ms_ < cfg_.display_timeout_ms; }
   // master only when enabled, no display seen recently, and (after boot) long enough to have heard one
   bool is_master(uint32_t now) const { return enabled_ && !display_present(now) && now >= cfg_.display_timeout_ms; }
@@ -84,6 +94,9 @@ class Poller {
   // register or a setpoint outside its range. Per-field checks are the caller's (write_value_ok).
   WriteResult request_write(uint32_t now, uint16_t reg, uint16_t val);
   bool write_active() const { return wstate_ != WState::NONE; }
+
+  // one line per finished write: "0122=1403 ok" / "0122=1404 failed: display appeared"
+  std::vector<std::string> take_write_results() { std::vector<std::string> e; e.swap(wresults_); return e; }
 
   // human-readable events since the last call (joined, lost, write results, ...)
   std::vector<std::string> take_events() { std::vector<std::string> e; e.swap(events_); return e; }
@@ -112,7 +125,12 @@ class Poller {
   WState wstate_{WState::NONE};
   uint16_t wreg_{REG_CH_SETPOINT}, wval_{0};
   uint32_t wtries_{0}, wrepeat_at_{0};
-  std::vector<std::string> events_;
+  std::vector<std::string> events_, wresults_;
+  std::vector<uint32_t> disp_hist_;
+  uint32_t echoes_{0}, strays_{0};
+  PollRequest last_sent_;
+  bool last_sent_valid_{false};
+  uint32_t last_sent_ms_{0}, wstart_ms_{0};
 };
 
 }  // namespace boiler

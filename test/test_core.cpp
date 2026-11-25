@@ -537,6 +537,10 @@ struct Sim {
     p.on_board_response(t, f);
   }
   PollRequest last;
+  // what a plugged-in display does: a request about every 127 ms (boiler capture); returns the time of the last one
+  void display(int n, uint32_t at) {
+    for (int i = 0; i < n; i++) { PollRequest q{0x0099, 0, 0x11}; p.on_display_request(at + 127u * i, &q); }
+  }
 };
 
 static void test_poller() {
@@ -655,15 +659,86 @@ static void test_poller() {
     s.p.update(s.t);
     PollRequest r;
     CHECK(s.p.armed(&r), "armed with no display");
-    s.p.on_display_request(s.t + 10);
-    s.p.update(s.t + 20);
-    CHECK(s.p.display_present(s.t + 20) && !s.p.armed(&r), "display -> disarmed");
-    CHECK(s.p.request_write(s.t + 30, REG_CH_SETPOINT, 0x2505) == WriteResult::NOT_MASTER, "write refused with display");
+    s.display(3, s.t + 10);  // 10, 137, 264 ms
+    s.p.update(s.t + 270);
+    CHECK(s.p.display_present(s.t + 270) && !s.p.armed(&r), "display -> disarmed within 0.3 s");
+    CHECK(s.p.request_write(s.t + 280, REG_CH_SETPOINT, 0x2505) == WriteResult::NOT_MASTER, "write refused with display");
     s.p.update(s.t + 4000);
     CHECK(!s.p.armed(&r), "still idle at 4 s");
-    s.p.update(s.t + 5100);
-    CHECK(!s.p.display_present(s.t + 5100) && s.p.armed(&r), "back after 5 s of silence");
+    s.p.update(s.t + 5400);
+    CHECK(!s.p.display_present(s.t + 5400) && s.p.armed(&r), "back after 5 s of silence");
     CHECK(s.p.mode() == PollMode::PING, "rejoin via ping slot");
+  }
+  {  // false display detection: a lone display-addressed frame (every ~10 s on the empty bus) is not a display
+    Sim s;
+    s.p.update(s.t);
+    PollRequest r, q{0x0099, 0, 0x11};
+    CHECK(s.p.on_display_request(s.t + 10, &q) == Poller::DispEvidence::STRAY, "one request is only a stray");
+    s.p.update(s.t + 20);
+    CHECK(!s.p.display_present(s.t + 20) && s.p.armed(&r), "no pause after one request");
+    CHECK(s.p.request_write(s.t + 30, REG_CH_SETPOINT, 0x2505) == WriteResult::OK, "write accepted right after a stray");
+    s.p.update(s.t + 40);
+    CHECK(s.p.write_active(), "write not aborted by a stray");
+    for (int i = 1; i <= 30; i++) s.p.on_display_request(s.t + 10 + 10000u * i, &q);  // 5 minutes of one frame per 10 s
+    CHECK(!s.p.display_present(s.t + 300010) && s.p.display_strays() == 31, "frames every 10 s never add up to a display");
+    // two close together are still not enough, the third is
+    s.p.on_display_request(s.t + 400000, &q);
+    s.p.on_display_request(s.t + 400127, &q);
+    CHECK(!s.p.display_present(s.t + 400200), "two requests are not enough");
+    CHECK(s.p.on_display_request(s.t + 400254, &q) == Poller::DispEvidence::CONFIRMED && s.p.display_present(s.t + 400254), "third within 2 s confirms");
+    // ... but not when they are spread over more than the window
+    Sim s2;
+    s2.p.update(s2.t);
+    s2.p.on_display_request(s2.t, &q); s2.p.on_display_request(s2.t + 1500, &q);
+    s2.p.on_display_request(s2.t + 3000, &q);
+    CHECK(!s2.p.display_present(s2.t + 3000), "three spread over 3 s are not a display");
+    // our own request seen back (misclassified as not ours) is never evidence, however often
+    Sim s3;
+    s3.p.update(s3.t);
+    for (int i = 0; i < 20; i++) {
+      PollRequest a;
+      CHECK(s3.p.armed(&a), "armed");
+      s3.fire(); s3.t += 20;
+      s3.p.on_display_request(s3.t, &s3.last);
+      s3.t += 380; s3.p.update(s3.t);
+    }
+    CHECK(!s3.p.display_present(s3.t) && s3.p.display_echoes() == 20, "own echoes ignored");
+  }
+  {  // a real display plugged in while we are joined and writing: polling stops within a second, the write is reported
+    Sim s;
+    s.p.update(s.t);
+    s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
+    CHECK(s.p.request_write(s.t, 0x0122, 0x1404) == WriteResult::OK, "write accepted");
+    s.fire(); s.t += 80; s.answer(0x1404); s.p.update(s.t);
+    s.t += 500;
+    s.display(8, s.t);  // 0.9 s of display traffic
+    s.p.update(s.t + 900);
+    PollRequest r;
+    CHECK(s.p.display_present(s.t + 900) && !s.p.armed(&r) && s.p.mode() == PollMode::PING && !s.p.write_active(), "paused, write aborted");
+    auto wr = s.p.take_write_results();
+    CHECK(wr.size() == 1 && wr[0] == "0122=1404 failed: display appeared", "reported: %s", wr.empty() ? "-" : wr[0].c_str());
+  }
+  {  // write results: ok, back-to-back writes, and a stuck write is abandoned instead of blocking for ever
+    Sim s;
+    s.p.update(s.t);
+    s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
+    CHECK(s.p.request_write(s.t, 0x0122, 0x1404) == WriteResult::OK, "first write");
+    CHECK(s.p.request_write(s.t, 0x0122, 0x1403) == WriteResult::BUSY, "second one is BUSY while the first runs (caller queues it)");
+    for (int i = 0; i < 400 && s.p.write_active(); i++) {
+      s.fire(); s.t += 80;
+      s.answer(s.last.is_write() ? s.last.val : 0x1404);
+      s.t += 100; s.p.update(s.t);
+    }
+    auto wr = s.p.take_write_results();
+    CHECK(!s.p.write_active() && wr.size() == 1 && wr[0] == "0122=1404 ok", "first ok: %s", wr.empty() ? "-" : wr[0].c_str());
+    CHECK(s.p.request_write(s.t, 0x0122, 0x1403) == WriteResult::OK, "next write right after a completed one is accepted");
+    // board never answers any more (but is_master stays true): the write times out
+    Sim u;
+    u.p.update(u.t);
+    CHECK(u.p.request_write(u.t, 0x0122, 0x1403) == WriteResult::OK, "write in ping mode");
+    for (int i = 0; i < 400 && u.p.write_active(); i++) { u.fire(); u.t += 300; u.p.update(u.t); }
+    wr = u.p.take_write_results();
+    CHECK(!u.p.write_active() && wr.size() == 1 && wr[0] == "0122=1403 failed: timed out", "timeout reported: %s", wr.empty() ? "-" : wr[0].c_str());
   }
   {  // boot guard and the switch
     Poller p(PollerConfig(), PollScheduler::defaults());
@@ -759,9 +834,11 @@ static void test_poller() {
     s.p.update(s.t);
     s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
     s.p.request_write(s.t, REG_CH_SETPOINT, 0x2505); s.p.update(s.t);
-    s.p.on_display_request(s.t + 10);
-    s.p.update(s.t + 20);
+    s.display(3, s.t + 10);
+    s.p.update(s.t + 280);
     CHECK(has_event(s.p.take_events(), "display appeared") && !s.p.write_active(), "display appearing aborts the write");
+    auto wr = s.p.take_write_results();
+    CHECK(wr.size() == 1 && wr[0] == "0101=2505 failed: display appeared", "abort is reported as a write result: %s", wr.empty() ? "-" : wr[0].c_str());
   }
   {
     Sim s;

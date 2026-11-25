@@ -167,6 +167,8 @@ boiler_bus:
     name: "Display connected"
   poll_result:
     name: "Last poll result"
+  last_write:
+    name: "Last write"
   frames_per_second:
     name: "Bus frame rate"
   crc_errors:
@@ -264,9 +266,19 @@ switch:
     icon: mdi:weather-partly-snowy-rainy
     entity_category: config
     turn_on_action:
-      - lambda: id(boiler_bus_hub).write_field(0x000B, 0x0080, 1);
+      - lambda: |-
+          auto *hub = id(boiler_bus_hub);
+          if (!hub->write_field(0x000B, 0x0080, 1)) {  // refused: show the real state again
+            float v = hub->read_field(0x000B, 0x0080);
+            if (!std::isnan(v)) id(sw_outdoor_reset).publish_state(v > 0);
+          }
     turn_off_action:
-      - lambda: id(boiler_bus_hub).write_field(0x000B, 0x0080, 0);
+      - lambda: |-
+          auto *hub = id(boiler_bus_hub);
+          if (!hub->write_field(0x000B, 0x0080, 0)) {  // refused: show the real state again
+            float v = hub->read_field(0x000B, 0x0080);
+            if (!std::isnan(v)) id(sw_outdoor_reset).publish_state(v > 0);
+          }
 
   - platform: template
     name: "Preheat enabled"
@@ -274,9 +286,19 @@ switch:
     icon: mdi:calendar-clock
     entity_category: config
     turn_on_action:
-      - lambda: id(boiler_bus_hub).write_field(0x0121, 0x0008, 1);
+      - lambda: |-
+          auto *hub = id(boiler_bus_hub);
+          if (!hub->write_field(0x0121, 0x0008, 1)) {  // refused: show the real state again
+            float v = hub->read_field(0x0121, 0x0008);
+            if (!std::isnan(v)) id(sw_preheat_enabled).publish_state(v > 0);
+          }
     turn_off_action:
-      - lambda: id(boiler_bus_hub).write_field(0x0121, 0x0008, 0);
+      - lambda: |-
+          auto *hub = id(boiler_bus_hub);
+          if (!hub->write_field(0x0121, 0x0008, 0)) {  // refused: show the real state again
+            float v = hub->read_field(0x0121, 0x0008);
+            if (!std::isnan(v)) id(sw_preheat_enabled).publish_state(v > 0);
+          }
 
   # Hot water preheat running now (register 0009, high byte bit 0x02). The display sets it from its own schedule;
   # this switch lets Home Assistant run the schedule instead. The low byte of 0009 is left alone.
@@ -285,15 +307,26 @@ switch:
     id: sw_preheat
     icon: mdi:water-boiler-auto
     turn_on_action:
-      - lambda: id(boiler_bus_hub).write_field(0x0009, 0x0200, 1);
+      - lambda: |-
+          auto *hub = id(boiler_bus_hub);
+          if (!hub->write_field(0x0009, 0x0200, 1)) {  // refused: show the real state again
+            float v = hub->read_field(0x0009, 0x0200);
+            if (!std::isnan(v)) id(sw_preheat).publish_state(v > 0);
+          }
     turn_off_action:
-      - lambda: id(boiler_bus_hub).write_field(0x0009, 0x0200, 0);
+      - lambda: |-
+          auto *hub = id(boiler_bus_hub);
+          if (!hub->write_field(0x0009, 0x0200, 0)) {  // refused: show the real state again
+            float v = hub->read_field(0x0009, 0x0200);
+            if (!std::isnan(v)) id(sw_preheat).publish_state(v > 0);
+          }
 
 # Heating (CH) setpoint, register 0101, and hot water (DHW) setpoint, register 0102. The state is what the boiler
 # reports, not the last command. Writes only go out while polling is on and no display is connected.
 number:
   - platform: template
     name: "Heating setpoint"
+    id: num_ch_setpoint
     icon: mdi:thermometer-lines
     device_class: temperature
     unit_of_measurement: "°C"
@@ -307,10 +340,12 @@ number:
       if (std::isnan(v)) return {};
       return v;
     set_action:
-      - lambda: id(boiler_bus_hub).write_ch_setpoint(x);
+      - lambda: |-
+          if (!id(boiler_bus_hub).write_ch_setpoint(x)) id(num_ch_setpoint).update();  // refused: show the real value again
 
   - platform: template
     name: "Hot water setpoint"
+    id: num_dhw_setpoint
     icon: mdi:water-thermometer
     device_class: temperature
     unit_of_measurement: "°C"
@@ -324,12 +359,14 @@ number:
       if (std::isnan(v)) return {};
       return v;
     set_action:
-      - lambda: id(boiler_bus_hub).write_dhw_setpoint(x);
+      - lambda: |-
+          if (!id(boiler_bus_hub).write_dhw_setpoint(x)) id(num_dhw_setpoint).update();  // refused: show the real value again
 
   # Installer settings (registers mapped 11-25, see register_map.md). 001A / 0012 are 1:HT Lo / Hi: stored as deg C
   # rounded to 0.5 and shown by the display in deg F. Minimum must stay below maximum.
   - platform: template
     name: "Heating minimum temperature"
+    id: num_ch_min
     icon: mdi:thermometer-chevron-down
     entity_category: config
     device_class: temperature
@@ -344,10 +381,12 @@ number:
       if (std::isnan(v)) return {};
       return v;
     set_action:
-      - lambda: id(boiler_bus_hub).write_min_temp(x);
+      - lambda: |-
+          if (!id(boiler_bus_hub).write_min_temp(x)) id(num_ch_min).update();  // refused: show the real value again
 
   - platform: template
     name: "Heating maximum temperature"
+    id: num_ch_max
     icon: mdi:thermometer-chevron-up
     entity_category: config
     device_class: temperature
@@ -362,11 +401,13 @@ number:
       if (std::isnan(v)) return {};
       return v;
     set_action:
-      - lambda: id(boiler_bus_hub).write_max_temp(x);
+      - lambda: |-
+          if (!id(boiler_bus_hub).write_max_temp(x)) id(num_ch_max).update();  // refused: show the real value again
 
   # Register 0122: high byte heating overrun, low byte hot water overrun (setting 13:Or, 0-60 min)
   - platform: template
     name: "Heating pump overrun"
+    id: num_ch_pump_overrun
     icon: mdi:pump
     entity_category: config
     unit_of_measurement: "min"
@@ -380,10 +421,12 @@ number:
       if (std::isnan(v)) return {};
       return v;
     set_action:
-      - lambda: id(boiler_bus_hub).write_field(0x0122, 0xFF00, (uint16_t) x);
+      - lambda: |-
+          if (!id(boiler_bus_hub).write_field(0x0122, 0xFF00, (uint16_t) x)) id(num_ch_pump_overrun).update();  // refused: show the real value again
 
   - platform: template
     name: "Hot water pump overrun"
+    id: num_dhw_pump_overrun
     icon: mdi:pump
     entity_category: config
     unit_of_measurement: "min"
@@ -397,11 +440,13 @@ number:
       if (std::isnan(v)) return {};
       return v;
     set_action:
-      - lambda: id(boiler_bus_hub).write_field(0x0122, 0x00FF, (uint16_t) x);
+      - lambda: |-
+          if (!id(boiler_bus_hub).write_field(0x0122, 0x00FF, (uint16_t) x)) id(num_dhw_pump_overrun).update();  // refused: show the real value again
 
   # Register 0108, setting 12:IV: re-ignite the burner once this many minutes have passed and the temperature dropped
   - platform: template
     name: "Re-ignite interval"
+    id: num_reignite
     icon: mdi:timer-refresh-outline
     entity_category: config
     unit_of_measurement: "min"
@@ -415,7 +460,8 @@ number:
       if (std::isnan(v)) return {};
       return v;
     set_action:
-      - lambda: id(boiler_bus_hub).write_field(0x0108, 0xFFFF, (uint16_t) x);
+      - lambda: |-
+          if (!id(boiler_bus_hub).write_field(0x0108, 0xFFFF, (uint16_t) x)) id(num_reignite).update();  // refused: show the real value again
 
 button:
   # writes 0000 to 0142..0146 (the display's "clear history"); the error history sensor shows the read-back

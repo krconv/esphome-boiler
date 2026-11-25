@@ -50,10 +50,36 @@ void Poller::disarm_() {
   armed_valid_ = false;
 }
 
+Poller::DispEvidence Poller::on_display_request(uint32_t now, const PollRequest *req) {
+  if (req && last_sent_valid_ && *req == last_sent_ && now - last_sent_ms_ <= cfg_.echo_window_ms) {
+    echoes_++;
+    return DispEvidence::ECHO;
+  }
+  if (display_present(now)) {  // already confirmed: any further request keeps it present
+    last_disp_ms_ = now;
+    return DispEvidence::PRESENT;
+  }
+  std::vector<uint32_t> keep;
+  for (uint32_t t : disp_hist_)
+    if (now - t <= cfg_.display_confirm_window_ms) keep.push_back(t);
+  keep.push_back(now);
+  disp_hist_.swap(keep);
+  if (disp_hist_.size() >= cfg_.display_confirm_count) {
+    disp_hist_.clear();
+    last_disp_ms_ = now;
+    seen_disp_ = true;
+    return DispEvidence::CONFIRMED;
+  }
+  strays_++;
+  return DispEvidence::STRAY;
+}
+
 void Poller::fail_write_(const char *why) {
   char b[112];
   snprintf(b, sizeof(b), "%s write %04X failed: %s", write_label(wreg_), wval_, why);
   event_(b);
+  snprintf(b, sizeof(b), "%04X=%04X failed: %s", wreg_, wval_, why);
+  if (wresults_.size() < 8) wresults_.push_back(b);
   wstate_ = WState::NONE;
 }
 
@@ -64,6 +90,7 @@ WriteResult Poller::request_write(uint32_t now, uint16_t reg, uint16_t val) {
   wreg_ = reg;
   wval_ = val;
   wtries_ = 0;
+  wstart_ms_ = now;
   wstate_ = WState::SEND1;
   return WriteResult::OK;
 }
@@ -71,6 +98,9 @@ WriteResult Poller::request_write(uint32_t now, uint16_t reg, uint16_t val) {
 void Poller::on_sent(uint32_t now, const PollRequest &fired) {
   inflight_ = fired;
   inflight_valid_ = true;
+  last_sent_ = fired;
+  last_sent_valid_ = true;
+  last_sent_ms_ = now;
   sent_ms_ = now;
   if (armed_valid_ && armed_ == fired) disarm_();
 }
@@ -108,6 +138,8 @@ bool Poller::on_board_response(uint32_t now, const Frame &f) {
     if (f.val == wval_) {
       snprintf(b, sizeof(b), "%s %04X confirmed by read-back", write_label(wreg_), f.val);
       event_(b);
+      snprintf(b, sizeof(b), "%04X=%04X ok", wreg_, wval_);
+      if (wresults_.size() < 8) wresults_.push_back(b);
       wstate_ = WState::NONE;
     } else {
       snprintf(b, sizeof(b), "read-back %04X, expected %04X", f.val, wval_);
@@ -163,6 +195,7 @@ void Poller::update(uint32_t now) {
     had_master_ = true;
     event_("no display: polling active");
   }
+  if (wstate_ != WState::NONE && now - wstart_ms_ > cfg_.write_timeout_ms) fail_write_("timed out");
   if (inflight_valid_ && now - sent_ms_ > cfg_.answer_timeout_ms) miss_(now);
   if (mode_ == PollMode::FAST && now - answered_ms_ > cfg_.watchdog_ms) lose_(now, "watchdog, no answer", true);
   // an armed request the sampler never sent (no gap found, transmit failed, event dropped): nothing else would re-arm it

@@ -48,6 +48,7 @@ void BoilerBus::setup() {
   // NB: no gpio_set_direction() after this: it would disconnect the RMT output from the pin
   this->tx_ok_ = this->tx_init_();
   if (this->poll_result_text_sensor_) this->poll_result_text_sensor_->publish_state("idle");
+  if (this->last_write_text_sensor_) this->last_write_text_sensor_->publish_state("none since boot");
 
   this->pref_ = global_preferences->make_preference<float>(fnv1_hash("boiler_bus_propane_total"));
   float restored;
@@ -227,7 +228,8 @@ void BoilerBus::enqueue_(const QItem &it) {
 void BoilerBus::handle_burst_(const boiler::BurstResult &br) {
   using boiler::ParseStatus;
   // a burst that began after we started transmitting is ours (the bus is idle >= 2 ms before we start)
-  const bool own = this->tx_active_ && br.start_sample >= this->tx_fire_idx_;
+  // (a burst that started inside our transmit window is ours even if the window closed before the burst was finalised)
+  const bool own = br.start_sample >= this->tx_fire_idx_ && (this->tx_active_ || br.start_sample < this->tx_win_end_);
   const char *label = "";
   if (own && this->tx_is_frame_) {
     char dec[80];
@@ -590,7 +592,16 @@ void BoilerBus::process_frame_(const QItem &it) {
     if (this->log_frames_) ESP_LOGD(TAG, "self> %s reg=%04X val=%04X", f.sub == 0x10 ? "WR" : "RD", f.reg, f.val);
     return;
   }
-  if (f.from_display() && f.is_request()) this->poller_.on_display_request(it.t_ms);
+  if (f.from_display() && f.is_request()) {
+    const boiler::PollRequest seen{f.reg, f.val, f.sub};
+    const auto ev = this->poller_.on_display_request(it.t_ms, &seen);
+    if (ev == boiler::Poller::DispEvidence::CONFIRMED)
+      ESP_LOGI(TAG, "display confirmed by repeated requests (last %s %04X)", f.sub == 0x10 ? "WR" : "RD", f.reg);
+    else if (ev != boiler::Poller::DispEvidence::PRESENT)
+      ESP_LOGD(TAG, "display-addressed %s %04X %s (%u echoes, %u strays so far)", f.sub == 0x10 ? "WR" : "RD", f.reg,
+               ev == boiler::Poller::DispEvidence::ECHO ? "is our own echo, ignored" : "alone, not enough to call it a display",
+               (unsigned) this->poller_.display_echoes(), (unsigned) this->poller_.display_strays());
+  }
   this->regchg_on_frame_(f);
   this->last_frame_ms_ = it.t_ms;
   this->any_frame_ = true;
@@ -772,26 +783,14 @@ bool BoilerBus::write_ch_setpoint(float c) { return this->write_setpoint_(boiler
 bool BoilerBus::write_dhw_setpoint(float c) { return this->write_setpoint_(boiler::REG_DHW_SETPOINT, c); }
 
 bool BoilerBus::write_setpoint_(uint16_t reg, float c) {
-  const uint32_t now = millis();
   const char *name = boiler::setpoint_name(reg);
   if (!boiler::setpoint_in_range(reg, c)) {
     ESP_LOGW(TAG, "%s setpoint %.1f C refused: outside %.0f..%.0f C", name, c, boiler::setpoint_min_c(reg), boiler::setpoint_max_c(reg));
+    this->refuse_write_(reg, "outside the allowed range");
     return false;
   }
-  const uint16_t val = boiler::encode_setpoint(reg, c);
-  const auto r = this->poller_.request_write(now, reg, val);
-  switch (r) {
-    case boiler::WriteResult::OK:
-      ESP_LOGI(TAG, "%s setpoint write queued: %.1f C = %04X", name, boiler::decode_setpoint(val), val);
-      if (this->poll_result_text_sensor_) this->poll_result_text_sensor_->publish_state(std::string(name) + " setpoint write queued");
-      return true;
-    case boiler::WriteResult::NOT_MASTER:
-      ESP_LOGW(TAG, "%s setpoint write refused: %s", name, this->poller_.enabled() ? "a display is on the bus" : "bus polling is off");
-      break;
-    case boiler::WriteResult::BUSY: ESP_LOGW(TAG, "%s setpoint write refused: previous write still running", name); break;
-    default: ESP_LOGW(TAG, "%s setpoint write refused: value out of range", name); break;
-  }
-  return false;
+  const PendingWrite w{reg, 0xFFFF, boiler::encode_setpoint(reg, c)};
+  return this->queue_writes_(&w, 1);  // queued like every other write, so one right behind another waits instead of being refused
 }
 
 float BoilerBus::read_field(uint16_t reg, uint16_t mask) const {
@@ -802,22 +801,40 @@ float BoilerBus::read_field(uint16_t reg, uint16_t mask) const {
   return (float) v;
 }
 
+void BoilerBus::publish_last_write_(const std::string &s) {
+  ESP_LOGI(TAG, "last write: %s", s.c_str());
+  if (this->last_write_text_sensor_) this->last_write_text_sensor_->publish_state(s);
+}
+
+void BoilerBus::refuse_write_(uint16_t reg, const char *why) {
+  ESP_LOGW(TAG, "write %04X refused: %s", reg, why);
+  char b[64];
+  snprintf(b, sizeof(b), "%04X refused: %s", reg, why);
+  this->publish_last_write_(b);
+}
+
+const char *BoilerBus::not_master_reason_(uint32_t now) const {
+  if (!this->poller_.enabled()) return "bus polling off";
+  if (this->poller_.display_present(now)) return "display present";
+  return "starting up";
+}
+
 bool BoilerBus::queue_writes_(const PendingWrite *w, size_t n) {
   const uint32_t now = millis();
   if (!this->poller_.is_master(now)) {
-    ESP_LOGW(TAG, "write %04X refused: %s", w[0].reg, this->poller_.enabled() ? "a display is on the bus" : "bus polling is off");
+    this->refuse_write_(w[0].reg, this->not_master_reason_(now));
     return false;
   }
   if (this->pending_writes_.size() + n > 8) {
-    ESP_LOGW(TAG, "write %04X refused: previous writes still running", w[0].reg);
+    this->refuse_write_(w[0].reg, "previous writes still queued");
     return false;
   }
   for (size_t i = 0; i < n; i++) this->pending_writes_.push_back(w[i]);
   ESP_LOGI(TAG, "write queued: %04X mask %04X value %04X (%u pending)", w[0].reg, w[0].mask, w[0].value, (unsigned) this->pending_writes_.size());
-  if (this->poll_result_text_sensor_) {
+  {
     char b[48];
-    snprintf(b, sizeof(b), "%s write queued", boiler::write_label(w[0].reg));
-    this->poll_result_text_sensor_->publish_state(b);
+    snprintf(b, sizeof(b), "%04X queued", w[0].reg);
+    this->publish_last_write_(b);
   }
   return true;
 }
@@ -828,11 +845,12 @@ bool BoilerBus::write_field(uint16_t reg, uint16_t mask, uint16_t value) {
   for (uint16_t t = mask; !(t & 1); t >>= 1) shift++;
   const uint16_t v = uint16_t(value << shift);
   if (!boiler::is_writable_reg(reg) || !boiler::write_value_ok(reg, mask, v)) {
-    ESP_LOGW(TAG, "write %04X mask %04X value %u refused: not allowed", reg, mask, (unsigned) value);
+    ESP_LOGW(TAG, "write %04X mask %04X value %u", reg, mask, (unsigned) value);
+    this->refuse_write_(reg, "value not allowed");
     return false;
   }
   if (mask != 0xFFFF && !this->table_.seen(reg)) {
-    ESP_LOGW(TAG, "write %04X refused: register not read yet (read-modify-write)", reg);
+    this->refuse_write_(reg, "register not read yet");
     return false;
   }
   const PendingWrite w{reg, mask, v};
@@ -842,18 +860,18 @@ bool BoilerBus::write_field(uint16_t reg, uint16_t mask, uint16_t value) {
 bool BoilerBus::write_temp_(uint16_t reg, float c) {
   const uint16_t v = boiler::encode_temp_c(c);
   if (!std::isfinite(c) || !boiler::write_value_ok(reg, 0xFFFF, v)) {
-    ESP_LOGW(TAG, "write %04X %.1f C refused: outside the allowed range", reg, c);
+    this->refuse_write_(reg, "outside the allowed range");
     return false;
   }
   const auto *other = this->table_.get(reg == boiler::REG_CH_MIN_TEMP ? boiler::REG_CH_MAX_TEMP : boiler::REG_CH_MIN_TEMP);
   if (!other) {
-    ESP_LOGW(TAG, "write %04X refused: the other limit has not been read yet", reg);
+    this->refuse_write_(reg, "other limit not read yet");
     return false;
   }
   const bool ok = reg == boiler::REG_CH_MIN_TEMP ? boiler::decode_temp_c(v) < boiler::decode_temp_c(other->val)
                                                  : boiler::decode_temp_c(v) > boiler::decode_temp_c(other->val);
   if (!ok) {
-    ESP_LOGW(TAG, "write %04X %.1f C refused: minimum must stay below maximum", reg, c);
+    this->refuse_write_(reg, "minimum must stay below maximum");
     return false;
   }
   const PendingWrite w{reg, 0xFFFF, v};
@@ -871,19 +889,32 @@ bool BoilerBus::clear_error_history() {
 
 // one queued write at a time through the poller's own write path (double write + read-back)
 void BoilerBus::drain_writes_() {
+  for (const auto &r : this->poller_.take_write_results()) this->publish_last_write_(r);
   if (this->pending_writes_.empty() || this->poller_.write_active()) return;
   const PendingWrite w = this->pending_writes_.front();
   this->pending_writes_.pop_front();
   const auto *e = this->table_.get(w.reg);
   uint16_t val = w.value;
+  const char *why = nullptr;
   if (w.mask != 0xFFFF) {
-    if (!e) { this->pending_writes_.clear(); return; }
-    val = uint16_t((e->val & ~w.mask) | w.value);
+    if (!e) why = "register not read yet";
+    else val = uint16_t((e->val & ~w.mask) | w.value);
   }
-  const auto r = this->poller_.request_write(millis(), w.reg, val);
-  if (r != boiler::WriteResult::OK) {
-    ESP_LOGW(TAG, "queued write %04X=%04X dropped (%s), %u more cleared", w.reg, val,
-             r == boiler::WriteResult::NOT_MASTER ? "not master" : "refused", (unsigned) this->pending_writes_.size());
+  if (!why) {
+    const uint32_t now = millis();
+    const auto r = this->poller_.request_write(now, w.reg, val);
+    if (r == boiler::WriteResult::NOT_MASTER) why = this->not_master_reason_(now);
+    else if (r == boiler::WriteResult::BUSY) why = "previous write still running";
+    else if (r != boiler::WriteResult::OK) why = "value out of range";
+  }
+  if (why) {
+    // the rest of a multi-register write (clear history) only makes sense as a whole, so it goes too, but loudly
+    char b[80];
+    const size_t more = this->pending_writes_.size();
+    if (more) snprintf(b, sizeof(b), "%04X dropped: %s (+%u queued dropped)", w.reg, why, (unsigned) more);
+    else snprintf(b, sizeof(b), "%04X dropped: %s", w.reg, why);
+    ESP_LOGW(TAG, "queued write %04X=%04X: %s", w.reg, val, b);
+    this->publish_last_write_(b);
     this->pending_writes_.clear();
   }
 }

@@ -130,6 +130,7 @@ TEXT_SENSORS = {
     "error_history": dict(icon="mdi:alert-circle-outline", entity_category=CAT),  # codes, E0 (most recent) first
     "last_error": dict(icon="mdi:alert-circle-outline"),  # E0 with a description, "None" when 0
     "poll_result": dict(icon="mdi:send-check", entity_category=CAT),  # join / loss / setpoint write events
+    "last_write": dict(icon="mdi:pencil-circle-outline", entity_category=CAT),  # outcome of the last setting write: ok / refused / dropped / failed
     "malformed_info": dict(icon="mdi:bug-outline", entity_category=CAT),  # latest malformed burst, at most 1 per second
     "malformed_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # ADC trace around the damage, 1 hex digit/sample
     "ok_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # ADC trace inside a good frame, every 10 s

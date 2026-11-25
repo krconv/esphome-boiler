@@ -40,7 +40,7 @@ namespace boiler_bus {
   X(adc_baseline) X(dip_depth) X(bit_period) X(last_frame_age) \
   X(malformed_short) X(malformed_long) X(dip_width) X(rejected_dips) X(tx_dip_depth) X(tx_dip_depth_bus) X(tx_bursts) X(heating_type_preset)
 #define BOILER_BINARY_SENSORS(X) X(pump) X(ch_demand) X(spark) X(flame) X(dhw_demand) X(bus_active) X(display_connected)
-#define BOILER_TEXT_SENSORS(X) X(state) X(status_raw) X(error_history) X(last_error) X(poll_result) X(malformed_info) X(malformed_trace) X(ok_trace) \
+#define BOILER_TEXT_SENSORS(X) X(state) X(status_raw) X(error_history) X(last_error) X(poll_result) X(last_write) X(malformed_info) X(malformed_trace) X(ok_trace) \
   X(register_changes) X(registers_seen) X(vent_material) X(tx_compare) X(req_compare) X(resp_compare) X(tx_trace) X(req_trace) X(resp_trace)
 
 class BoilerBus : public Component {
@@ -142,6 +142,9 @@ class BoilerBus : public Component {
   std::deque<PendingWrite> pending_writes_;
   bool queue_writes_(const PendingWrite *w, size_t n);
   void drain_writes_();
+  void publish_last_write_(const std::string &s);
+  void refuse_write_(uint16_t reg, const char *why);
+  const char *not_master_reason_(uint32_t now) const;
   bool write_temp_(uint16_t reg, float celsius);
   std::unordered_map<uint16_t, uint16_t> regchg_wlast_;  // last value written to the noisy write registers (004C/D/E)
   void publish_diagnostics_(uint32_t now);
