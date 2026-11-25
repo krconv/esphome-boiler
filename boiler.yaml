@@ -55,7 +55,24 @@ external_components:
 # Every probe found is logged at boot ("Found devices:" in the one_wire log).
 one_wire:
   - platform: gpio
+    id: ow_bus
     pin: GPIO33
+
+# Lists the probe addresses found on the bus (for naming them below)
+text_sensor:
+  - platform: template
+    name: "1-Wire addresses"
+    entity_category: diagnostic
+    icon: mdi:identifier
+    update_interval: 60s
+    lambda: |-
+      std::string s;
+      for (auto a : id(ow_bus)->get_devices()) {
+        char b[24];
+        snprintf(b, sizeof(b), "%s0x%016llx", s.empty() ? "" : ",", (unsigned long long) a);
+        s += b;
+      }
+      return s.empty() ? std::string("none") : s;
 
 # sensor:
 #   - platform: dallas_temp
