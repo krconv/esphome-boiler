@@ -181,43 +181,43 @@ time:
 sensor:
   - platform: dallas_temp
     address: 0xa9000000db97d028
-    name: "Basement Supply Temperature"
+    name: "Basement supply temperature"
     update_interval: 5s
   - platform: dallas_temp
     address: 0x79000000d8fafe28
-    name: "Basement Return Temperature"
+    name: "Basement return temperature"
     update_interval: 5s
   - platform: dallas_temp
     address: 0x7f000000dc2f7c28
-    name: "First Floor Supply Temperature"
+    name: "First Floor supply temperature"
     update_interval: 5s
   - platform: dallas_temp
     address: 0xf5000000db81af28
-    name: "First Floor Return Temperature"
+    name: "First Floor return temperature"
     update_interval: 5s
   - platform: dallas_temp
     address: 0x46000000da8dd828
-    name: "West Wing Supply Temperature"
+    name: "West Wing supply temperature"
     update_interval: 5s
   - platform: dallas_temp
     address: 0x56000000dc3d2728
-    name: "West Wing Return Temperature"
+    name: "West Wing return temperature"
     update_interval: 5s
   - platform: dallas_temp
     address: 0x66000000dc0c0d28
-    name: "East Wing Supply Temperature"
+    name: "East Wing supply temperature"
     update_interval: 5s
   - platform: dallas_temp
     address: 0xc4000000db7bd928
-    name: "East Wing Return Temperature"
+    name: "East Wing return temperature"
     update_interval: 5s
   - platform: dallas_temp
     address: 0x30000000dc0deb28
-    name: "Garage Supply Temperature"
+    name: "Garage supply temperature"
     update_interval: 5s
   - platform: dallas_temp
     address: 0xda000000db070028
-    name: "Garage Return Temperature"
+    name: "Garage return temperature"
     update_interval: 5s
   - platform: copy
     source_id: propane_used
