@@ -220,6 +220,26 @@ bool setpoint_in_range(uint16_t reg, float c);   // finite and within the regist
 uint16_t encode_setpoint(uint16_t reg, float c); // clamped to the range, rounded to the nearest 0.5: 38.0 -> 2600, 37.5 -> 2505
 float decode_setpoint(uint16_t v);               // inverse of encode_setpoint (same as decode_temp_c)
 
+// ---- installer settings (mapped 11-25, see register_map.md) ---------------------------------------------------
+constexpr uint16_t REG_CH_MIN_TEMP = 0x001A, REG_CH_MAX_TEMP = 0x0012;  // temperature format, deg C
+constexpr uint16_t REG_OUTDOOR_RESET = 0x000B;                           // bit 0x0080
+constexpr uint16_t REG_HEATING_TYPE = 0x0131, REG_VENT_MATERIAL = 0x0097;  // read only
+constexpr uint16_t REG_PREHEAT_ENABLE = 0x0121;                          // 0008 on, 0000 off
+constexpr uint16_t REG_INTERVAL = 0x0108;                                // re-ignite interval, minutes (0..20)
+constexpr uint16_t REG_PUMP_OVERRUN = 0x0122;                            // high byte heating min, low byte hot water min (0..60)
+constexpr uint16_t REG_DISPLAY_FLAGS = 0x0009;                           // high byte bit 0x02 = DHW preheat active
+constexpr uint16_t REG_ERROR_HISTORY_FIRST = 0x0142, REG_ERROR_HISTORY_LAST = 0x0146;
+constexpr uint16_t OUTDOOR_RESET_BIT = 0x0080, PREHEAT_ENABLE_BIT = 0x0008, PREHEAT_ACTIVE_BIT = 0x0200;
+// 1:HT Lo (001A) is 80..120 F, 1:HT Hi (0012) 121..180 F (Install manual p.47); stored as deg C rounded to 0.5
+constexpr float CH_MIN_TEMP_LO_C = 26.5f, CH_MIN_TEMP_HI_C = 49.0f, CH_MAX_TEMP_LO_C = 49.5f, CH_MAX_TEMP_HI_C = 82.0f;
+// Registers the poller may write: the setpoints plus the installer settings above.
+bool is_writable_reg(uint16_t reg);
+// May the masked field of `reg` be set to `value` (already shifted into place, within mask)? Range / enum check only.
+bool write_value_ok(uint16_t reg, uint16_t mask, uint16_t value);
+// Short name used in write log lines: "CH setpoint", "DHW setpoint", "reg 0122"
+const char *write_label(uint16_t reg);
+uint16_t encode_temp_c(float c);  // nearest 0.5 deg C, no clamp
+
 // register 0010 bits
 constexpr uint16_t ST_CH_DEMAND = 0x0002;
 constexpr uint16_t ST_PUMP = 0x0008;

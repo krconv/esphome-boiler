@@ -538,8 +538,13 @@ void BoilerBus::regchg_event_(bool is_write, const char *fmt, ...) {
 
 void BoilerBus::regchg_on_frame_(const boiler::Frame &f) {
   if (!this->register_changes_text_sensor_ && !this->registers_seen_text_sensor_) return;
-  if (this->regs_seen_.insert(f.reg).second) this->regs_seen_dirty_ = true;
+  if (!boiler::is_known_register(f.reg) && this->regs_seen_.insert(f.reg).second) this->regs_seen_dirty_ = true;
   if (f.sub == 0x10) {  // write request (display) or its acknowledge / echo (board)
+    if (f.reg == 0x004C || f.reg == 0x004D || f.reg == 0x004E) {  // rewritten constantly: only a changed value is news
+      auto w = this->regchg_wlast_.find(f.reg);
+      if (w != this->regchg_wlast_.end() && w->second == f.val) return;
+      this->regchg_wlast_[f.reg] = f.val;
+    }
     this->regchg_event_(true, "W %04X %04X (%s)", f.reg, f.val, f.from_display() ? "disp" : "brd");
     return;
   }
@@ -693,6 +698,18 @@ void BoilerBus::on_register_(uint16_t reg, uint16_t val, uint32_t now) {
     case 0x0095: case 0x0096: this->publish_counter_(0x0095, 0x0096, this->ch_ignitions_sensor_); break;
     case 0x0135: case 0x0136: this->publish_counter_(0x0135, 0x0136, this->dhw_counter_sensor_); break;
     case 0x0098: case 0x0099: this->publish_counter_(0x0098, 0x0099, this->pump_hours_sensor_); break;
+    case 0x0131: this->pub_(this->heating_type_preset_sensor_, (float) val, now); break;
+    case 0x0097:
+      if (this->vent_material_text_sensor_) {
+        char b[8];
+        snprintf(b, sizeof(b), "%04X", val);
+        const std::string t = val == 0 ? "PVC" : b;
+        if (t != this->last_vent_) {
+          this->last_vent_ = t;
+          this->vent_material_text_sensor_->publish_state(t);
+        }
+      }
+      break;
     case 0x0027: this->pub_(this->flow_sensor_, val / 1000.0f, now); break;
     case 0x0033: this->pub_(this->fan_rpm_sensor_, (float) val, now); break;
     case 0x0132: this->pub_(this->water_pressure_sensor_, (float) val, now); break;
@@ -777,6 +794,100 @@ bool BoilerBus::write_setpoint_(uint16_t reg, float c) {
   return false;
 }
 
+float BoilerBus::read_field(uint16_t reg, uint16_t mask) const {
+  const auto *e = this->table_.get(reg);
+  if (!e || !mask) return NAN;
+  uint16_t v = e->val & mask;
+  while (!(mask & 1)) { mask >>= 1; v >>= 1; }
+  return (float) v;
+}
+
+bool BoilerBus::queue_writes_(const PendingWrite *w, size_t n) {
+  const uint32_t now = millis();
+  if (!this->poller_.is_master(now)) {
+    ESP_LOGW(TAG, "write %04X refused: %s", w[0].reg, this->poller_.enabled() ? "a display is on the bus" : "bus polling is off");
+    return false;
+  }
+  if (this->pending_writes_.size() + n > 8) {
+    ESP_LOGW(TAG, "write %04X refused: previous writes still running", w[0].reg);
+    return false;
+  }
+  for (size_t i = 0; i < n; i++) this->pending_writes_.push_back(w[i]);
+  ESP_LOGI(TAG, "write queued: %04X mask %04X value %04X (%u pending)", w[0].reg, w[0].mask, w[0].value, (unsigned) this->pending_writes_.size());
+  if (this->poll_result_text_sensor_) {
+    char b[48];
+    snprintf(b, sizeof(b), "%s write queued", boiler::write_label(w[0].reg));
+    this->poll_result_text_sensor_->publish_state(b);
+  }
+  return true;
+}
+
+bool BoilerBus::write_field(uint16_t reg, uint16_t mask, uint16_t value) {
+  if (!mask) return false;
+  uint16_t shift = 0;
+  for (uint16_t t = mask; !(t & 1); t >>= 1) shift++;
+  const uint16_t v = uint16_t(value << shift);
+  if (!boiler::is_writable_reg(reg) || !boiler::write_value_ok(reg, mask, v)) {
+    ESP_LOGW(TAG, "write %04X mask %04X value %u refused: not allowed", reg, mask, (unsigned) value);
+    return false;
+  }
+  if (mask != 0xFFFF && !this->table_.seen(reg)) {
+    ESP_LOGW(TAG, "write %04X refused: register not read yet (read-modify-write)", reg);
+    return false;
+  }
+  const PendingWrite w{reg, mask, v};
+  return this->queue_writes_(&w, 1);
+}
+
+bool BoilerBus::write_temp_(uint16_t reg, float c) {
+  const uint16_t v = boiler::encode_temp_c(c);
+  if (!std::isfinite(c) || !boiler::write_value_ok(reg, 0xFFFF, v)) {
+    ESP_LOGW(TAG, "write %04X %.1f C refused: outside the allowed range", reg, c);
+    return false;
+  }
+  const auto *other = this->table_.get(reg == boiler::REG_CH_MIN_TEMP ? boiler::REG_CH_MAX_TEMP : boiler::REG_CH_MIN_TEMP);
+  if (!other) {
+    ESP_LOGW(TAG, "write %04X refused: the other limit has not been read yet", reg);
+    return false;
+  }
+  const bool ok = reg == boiler::REG_CH_MIN_TEMP ? boiler::decode_temp_c(v) < boiler::decode_temp_c(other->val)
+                                                 : boiler::decode_temp_c(v) > boiler::decode_temp_c(other->val);
+  if (!ok) {
+    ESP_LOGW(TAG, "write %04X %.1f C refused: minimum must stay below maximum", reg, c);
+    return false;
+  }
+  const PendingWrite w{reg, 0xFFFF, v};
+  return this->queue_writes_(&w, 1);
+}
+
+bool BoilerBus::write_min_temp(float c) { return this->write_temp_(boiler::REG_CH_MIN_TEMP, c); }
+bool BoilerBus::write_max_temp(float c) { return this->write_temp_(boiler::REG_CH_MAX_TEMP, c); }
+
+bool BoilerBus::clear_error_history() {
+  PendingWrite w[5];
+  for (uint16_t i = 0; i < 5; i++) w[i] = {uint16_t(boiler::REG_ERROR_HISTORY_FIRST + i), 0xFFFF, 0};
+  return this->queue_writes_(w, 5);
+}
+
+// one queued write at a time through the poller's own write path (double write + read-back)
+void BoilerBus::drain_writes_() {
+  if (this->pending_writes_.empty() || this->poller_.write_active()) return;
+  const PendingWrite w = this->pending_writes_.front();
+  this->pending_writes_.pop_front();
+  const auto *e = this->table_.get(w.reg);
+  uint16_t val = w.value;
+  if (w.mask != 0xFFFF) {
+    if (!e) { this->pending_writes_.clear(); return; }
+    val = uint16_t((e->val & ~w.mask) | w.value);
+  }
+  const auto r = this->poller_.request_write(millis(), w.reg, val);
+  if (r != boiler::WriteResult::OK) {
+    ESP_LOGW(TAG, "queued write %04X=%04X dropped (%s), %u more cleared", w.reg, val,
+             r == boiler::WriteResult::NOT_MASTER ? "not master" : "refused", (unsigned) this->pending_writes_.size());
+    this->pending_writes_.clear();
+  }
+}
+
 void BoilerBus::poll_arm_(const boiler::PollRequest &r, bool valid) {
   this->tx_req_word_.store(valid ? (1ull << 63) | ((uint64_t) r.sub << 32) | ((uint64_t) r.reg << 16) | r.val : 0);
 }
@@ -792,6 +903,7 @@ void BoilerBus::poll_timing_() {
 void BoilerBus::poll_tick_(uint32_t now) {
   if (!this->tx_ok_) return;
   this->poller_.update(now);
+  this->drain_writes_();
   const int disp = this->poller_.display_present(now) ? 1 : 0;
   if (disp != this->last_display_state_) {
     this->last_display_state_ = disp;

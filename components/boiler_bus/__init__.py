@@ -46,7 +46,9 @@ INC = STATE_CLASS_TOTAL_INCREASING
 
 
 def _s(unit=None, acc=0, dc=None, sc=MEAS, icon=None, cat=None):
-    kw = dict(accuracy_decimals=acc, state_class=sc)
+    kw = dict(accuracy_decimals=acc)
+    if sc:
+        kw["state_class"] = sc
     if unit:
         kw["unit_of_measurement"] = unit
     if dc:
@@ -108,6 +110,7 @@ SENSORS = {
     "tx_dip_depth": _s("mV", 0, None, MEAS, "mdi:flash", CAT),
     "tx_bursts": _s(None, 0, None, INC, "mdi:flash", CAT),  # test patterns sent since boot
     "tx_dip_depth_bus": _s(UNIT_VOLT, 2, DEVICE_CLASS_VOLTAGE, MEAS, "mdi:flash", CAT),
+    "heating_type_preset": _s(None, 0, None, None, "mdi:radiator", CAT),  # register 0131, raw
 }
 
 BINARY_SENSORS = {
@@ -133,6 +136,7 @@ TEXT_SENSORS = {
     "tx_compare": dict(icon="mdi:compare", entity_category=CAT),  # waveform summary + decode of our own last frame
     "register_changes": dict(icon="mdi:swap-horizontal", entity_category=CAT),  # one line per bus write / changed or new register
     "registers_seen": dict(icon="mdi:format-list-numbered", entity_category=CAT),  # distinct registers read or written since boot
+    "vent_material": dict(icon="mdi:pipe", entity_category=CAT),  # register 0097: PVC when 0, else the raw value
     "req_compare": dict(icon="mdi:compare", entity_category=CAT),  # same summary for a display request (every 2 s)
     "resp_compare": dict(icon="mdi:compare", entity_category=CAT),  # same summary for a board response (every 2 s)
     "tx_trace": dict(icon="mdi:chart-line", entity_category=CAT),  # raw ADC counts (3 hex digits each) in our own frame, dips 20..23

@@ -24,12 +24,23 @@ class PollScheduler {
   PollScheduler(std::vector<uint16_t> fast, std::vector<uint16_t> slow) : fast_(std::move(fast)), slow_(std::move(slow)) {}
   static PollScheduler defaults();
   uint16_t next();
+  // Registers read on their own clock (settings, 60 s; display flags, 15 s) instead of in the slow round-robin.
+  // A due one wins over the next() slot; the first reads come a few seconds after the first call, staggered.
+  struct Timed {
+    uint16_t reg;
+    uint32_t period_ms;
+    uint32_t last_ms{0};
+  };
+  void set_timed(std::vector<Timed> t) { timed_ = std::move(t); }
+  uint16_t next(uint32_t now);
   const std::vector<uint16_t> &fast() const { return fast_; }
   const std::vector<uint16_t> &slow() const { return slow_; }
 
  private:
   std::vector<uint16_t> fast_, slow_;
   size_t step_{0}, slow_pos_{0};
+  std::vector<Timed> timed_;
+  bool timed_started_{false};
 };
 
 struct PollerConfig {
@@ -69,7 +80,8 @@ class Poller {
   void on_board_unsolicited(uint32_t now, const Frame &f);       // any board frame that did not answer us
   void update(uint32_t now);                                     // timeouts, arming; call every loop
 
-  // write val to a setpoint register (REG_CH_SETPOINT / REG_DHW_SETPOINT); OUT_OF_RANGE for any other register
+  // write val to a writable register (setpoints, installer settings: is_writable_reg); OUT_OF_RANGE for any other
+  // register or a setpoint outside its range. Per-field checks are the caller's (write_value_ok).
   WriteResult request_write(uint32_t now, uint16_t reg, uint16_t val);
   bool write_active() const { return wstate_ != WState::NONE; }
 

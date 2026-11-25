@@ -332,6 +332,7 @@ bool is_known_register(uint16_t r) {
     case 0x0133: case 0x0134: case 0x0135: case 0x0136:
     case 0x0027: case 0x0033: case 0x0132: case 0x0137:
     case 0x0142: case 0x0143: case 0x0144: case 0x0145: case 0x0146:
+    case 0x001A: case 0x0012: case 0x000B: case 0x0131: case 0x0097: case 0x0121: case 0x0108: case 0x0122: case 0x0009:
       return true;
     default:
       return false;
@@ -439,6 +440,55 @@ uint16_t encode_setpoint(uint16_t reg, float c) {
 }
 
 float decode_setpoint(uint16_t v) { return decode_temp_c(v); }
+
+uint16_t encode_temp_c(float c) {
+  const int half = (int) std::floor(c * 2.0f + 0.5f);
+  return uint16_t(((half / 2) << 8) | ((half & 1) ? 0x05 : 0x00));
+}
+
+bool is_writable_reg(uint16_t reg) {
+  switch (reg) {
+    case REG_CH_SETPOINT: case REG_DHW_SETPOINT:
+    case REG_CH_MIN_TEMP: case REG_CH_MAX_TEMP: case REG_OUTDOOR_RESET: case REG_PREHEAT_ENABLE: case REG_INTERVAL:
+    case REG_PUMP_OVERRUN: case REG_DISPLAY_FLAGS:
+      return true;
+    default:
+      return reg >= REG_ERROR_HISTORY_FIRST && reg <= REG_ERROR_HISTORY_LAST;
+  }
+}
+
+static bool temp_value_ok_(uint16_t v, float lo, float hi) {
+  if ((v & 0xFF) != 0x00 && (v & 0xFF) != 0x05) return false;
+  const float c = decode_temp_c(v);
+  return c >= lo && c <= hi;
+}
+
+bool write_value_ok(uint16_t reg, uint16_t mask, uint16_t value) {
+  if ((value & ~mask) != 0) return false;
+  switch (reg) {
+    case REG_CH_SETPOINT: case REG_DHW_SETPOINT: return mask == 0xFFFF && setpoint_in_range(reg, decode_setpoint(value));
+    case REG_CH_MIN_TEMP: return mask == 0xFFFF && temp_value_ok_(value, CH_MIN_TEMP_LO_C, CH_MIN_TEMP_HI_C);
+    case REG_CH_MAX_TEMP: return mask == 0xFFFF && temp_value_ok_(value, CH_MAX_TEMP_LO_C, CH_MAX_TEMP_HI_C);
+    case REG_OUTDOOR_RESET: return mask == OUTDOOR_RESET_BIT;
+    case REG_PREHEAT_ENABLE: return mask == PREHEAT_ENABLE_BIT;
+    case REG_DISPLAY_FLAGS: return mask == PREHEAT_ACTIVE_BIT;
+    case REG_INTERVAL: return mask == 0xFFFF && value <= 20;
+    case REG_PUMP_OVERRUN:
+      if (mask == 0xFF00) return (value >> 8) <= 60;
+      if (mask == 0x00FF) return value <= 60;
+      return false;
+    default:
+      return reg >= REG_ERROR_HISTORY_FIRST && reg <= REG_ERROR_HISTORY_LAST && mask == 0xFFFF && value == 0;
+  }
+}
+
+const char *write_label(uint16_t reg) {
+  static char buf[12];
+  if (reg == REG_CH_SETPOINT) return "CH setpoint";
+  if (reg == REG_DHW_SETPOINT) return "DHW setpoint";
+  snprintf(buf, sizeof(buf), "reg %04X", reg);
+  return buf;
+}
 
 std::vector<TxPulse> tx_frame_pulses(const uint8_t bytes[FRAME_BYTES], uint32_t dip_us) {
   dip_us = clamp_tx_dip_us(float(dip_us));

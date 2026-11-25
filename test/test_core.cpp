@@ -473,11 +473,36 @@ static void test_write_setpoint() {
             !setpoint_in_range(REG_DHW_SETPOINT, NAN), "dhw range");
   for (int h = 64; h <= 120; h++) CHECK(decode_setpoint(encode_setpoint(REG_DHW_SETPOINT, h / 2.0f)) == h / 2.0f, "dhw round trip %d", h);
   CHECK(is_setpoint_reg(0x0101) && is_setpoint_reg(0x0102) && !is_setpoint_reg(0x0103), "setpoint regs");
+  // installer settings
+  CHECK(encode_temp_c(26.67f) == 0x1A05 && encode_temp_c(27.22f) == 0x1B00 && encode_temp_c(76.67f) == 0x4C05, "min/max temp encode (80/81/170 F)");
+  CHECK(write_value_ok(REG_CH_MIN_TEMP, 0xFFFF, 0x1A05) && write_value_ok(REG_CH_MIN_TEMP, 0xFFFF, 0x3100) && !write_value_ok(REG_CH_MIN_TEMP, 0xFFFF, 0x1A00) && !write_value_ok(REG_CH_MIN_TEMP, 0xFFFF, 0x3200), "min temp range");
+  CHECK(write_value_ok(REG_CH_MAX_TEMP, 0xFFFF, 0x4C05) && write_value_ok(REG_CH_MAX_TEMP, 0xFFFF, 0x5200) && !write_value_ok(REG_CH_MAX_TEMP, 0xFFFF, 0x5300) && !write_value_ok(REG_CH_MAX_TEMP, 0xFFFF, 0x3000) && !write_value_ok(REG_CH_MAX_TEMP, 0xFFFF, 0x4C03), "max temp range");
+  CHECK(write_value_ok(REG_PUMP_OVERRUN, 0xFF00, 0x1400) && write_value_ok(REG_PUMP_OVERRUN, 0x00FF, 4) && !write_value_ok(REG_PUMP_OVERRUN, 0x00FF, 61) && !write_value_ok(REG_PUMP_OVERRUN, 0xFF00, 0x3D00) && !write_value_ok(REG_PUMP_OVERRUN, 0xFFFF, 0x1403), "pump overrun");
+  CHECK(write_value_ok(REG_INTERVAL, 0xFFFF, 4) && !write_value_ok(REG_INTERVAL, 0xFFFF, 21), "interval");
+  CHECK(write_value_ok(REG_DISPLAY_FLAGS, 0x0200, 0x0200) && write_value_ok(REG_DISPLAY_FLAGS, 0x0200, 0) && !write_value_ok(REG_DISPLAY_FLAGS, 0xFFFF, 0x0231), "preheat bit only");
+  CHECK(write_value_ok(REG_OUTDOOR_RESET, 0x0080, 0x80) && !write_value_ok(REG_OUTDOOR_RESET, 0xFFFF, 0x80) && write_value_ok(REG_PREHEAT_ENABLE, 0x0008, 8), "reset / preheat enable");
+  CHECK(write_value_ok(0x0144, 0xFFFF, 0) && !write_value_ok(0x0144, 0xFFFF, 1) && !write_value_ok(0x0147, 0xFFFF, 0) && !write_value_ok(REG_VENT_MATERIAL, 0xFFFF, 0) && !write_value_ok(REG_HEATING_TYPE, 0xFFFF, 1), "history clear only; read-only regs refused");
+  CHECK(is_writable_reg(0x0142) && is_writable_reg(0x0122) && !is_writable_reg(0x0097) && !is_writable_reg(0x004C), "writable regs");
+  {
+    PollScheduler sch = PollScheduler::defaults();
+    int n9 = 0, n122 = 0;
+    uint16_t first = sch.next(1000);
+    for (uint32_t t = 1000; t < 1000 + 120000; t += 200) {
+      uint16_t r = sch.next(t);
+      if (r == 0x0009) n9++;
+      if (r == 0x0122) n122++;
+    }
+    CHECK(first != 0x0009 && n9 >= 7 && n9 <= 9 && n122 >= 1 && n122 <= 3, "timed regs: 0009 every 15 s, settings every 60 s (got %d, %d)", n9, n122);
+  }
+  {
+    PollScheduler sch({0x0010}, {0x0101});
+    CHECK(sch.next(5) == 0x0010 && sch.next(6) == 0x0101, "no timed regs: plain round-robin");
+  }
 }
 
 static void test_scheduler() {
   auto sc = PollScheduler::defaults();
-  CHECK(sc.fast().size() == 5 && sc.slow().size() == 24, "default lists %zu/%zu", sc.fast().size(), sc.slow().size());
+  CHECK(sc.fast().size() == 5 && sc.slow().size() == 23, "default lists %zu/%zu", sc.fast().size(), sc.slow().size());
   // fast registers every pass, slow ones interleaved, every slow register comes round
   std::map<uint16_t, int> n;
   std::vector<uint16_t> seq;

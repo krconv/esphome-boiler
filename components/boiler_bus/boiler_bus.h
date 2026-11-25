@@ -38,10 +38,10 @@ namespace boiler_bus {
   X(gas_btu_h) X(propane_gal_h) X(propane_total) \
   X(frames_per_second) X(frames_ok) X(crc_errors) X(malformed_frames) X(unknown_frames) X(adc_overruns) \
   X(adc_baseline) X(dip_depth) X(bit_period) X(last_frame_age) \
-  X(malformed_short) X(malformed_long) X(dip_width) X(rejected_dips) X(tx_dip_depth) X(tx_dip_depth_bus) X(tx_bursts)
+  X(malformed_short) X(malformed_long) X(dip_width) X(rejected_dips) X(tx_dip_depth) X(tx_dip_depth_bus) X(tx_bursts) X(heating_type_preset)
 #define BOILER_BINARY_SENSORS(X) X(pump) X(ch_demand) X(spark) X(flame) X(dhw_demand) X(bus_active) X(display_connected)
 #define BOILER_TEXT_SENSORS(X) X(state) X(status_raw) X(error_history) X(last_error) X(poll_result) X(malformed_info) X(malformed_trace) X(ok_trace) \
-  X(register_changes) X(registers_seen) X(tx_compare) X(req_compare) X(resp_compare) X(tx_trace) X(req_trace) X(resp_trace)
+  X(register_changes) X(registers_seen) X(vent_material) X(tx_compare) X(req_compare) X(resp_compare) X(tx_trace) X(req_trace) X(resp_trace)
 
 class BoilerBus : public Component {
  public:
@@ -79,6 +79,20 @@ class BoilerBus : public Component {
   // Same for the hot water setpoint (register 0102, 32..60 C).
   float dhw_setpoint_c() const;
   bool write_dhw_setpoint(float celsius);
+
+  // ---- installer settings (registers mapped 11-25). Values are what the boiler last reported (poller or display). ----
+  // Masked field of a register, shifted down; NAN until the register has been seen.
+  float read_field(uint16_t reg, uint16_t mask) const;
+  float read_temp_c(uint16_t reg) const { return this->setpoint_c_(reg); }  // temperature format, deg C; NAN until seen
+  // Queue a read-modify-write of the masked field (value is unshifted). Other bits are taken from the register's
+  // latest value when the write is sent. false (and a log line) if refused: unknown register, value out of range,
+  // register never read, display present, polling off, queue full.
+  bool write_field(uint16_t reg, uint16_t mask, uint16_t value);
+  // 001A / 0012 in deg C; refuses a minimum >= the current maximum and the reverse.
+  bool write_min_temp(float celsius);
+  bool write_max_temp(float celsius);
+  // Queue 0000 to 0142..0146; the poller reads them back after each write.
+  bool clear_error_history();
 
   void setup() override;
   void loop() override;
@@ -122,6 +136,14 @@ class BoilerBus : public Component {
   float setpoint_c_(uint16_t reg) const;
   bool write_setpoint_(uint16_t reg, float celsius);
   void tick_(uint32_t now);
+  struct PendingWrite {
+    uint16_t reg, mask, value;
+  };
+  std::deque<PendingWrite> pending_writes_;
+  bool queue_writes_(const PendingWrite *w, size_t n);
+  void drain_writes_();
+  bool write_temp_(uint16_t reg, float celsius);
+  std::unordered_map<uint16_t, uint16_t> regchg_wlast_;  // last value written to the noisy write registers (004C/D/E)
   void publish_diagnostics_(uint32_t now);
   // register-change diagnostic (main loop only): events are queued in process_frame_, published from loop()
   void regchg_event_(bool is_write, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
@@ -198,7 +220,7 @@ class BoilerBus : public Component {
   uint32_t last_frame_ms_{0};
   bool any_frame_{false};
   std::unordered_map<sensor::Sensor *, std::pair<float, uint32_t>> last_pub_;
-  std::string last_state_, last_raw_, last_err_, last_err_text_;
+  std::string last_state_, last_raw_, last_err_, last_err_text_, last_vent_;
   uint32_t last_tick_ms_{0}, last_diag_ms_{0}, last_diag_frames_{0}, last_save_ms_{0};
   double propane_total_{0};
   float saved_total_{0};

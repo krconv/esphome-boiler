@@ -5,10 +5,28 @@
 namespace boiler {
 
 PollScheduler PollScheduler::defaults() {
-  return PollScheduler(
+  PollScheduler s(
       {0x0010, 0x0020, 0x0033, 0x0027, 0x0137},  // status, supply, fan rpm, flow, flame volts x10
       {0x0130, 0x0021, 0x0022, 0x0023, 0x0024, 0x0132, 0x0101, 0x0102, 0x0091, 0x0092, 0x0093, 0x0094,
-       0x0095, 0x0096, 0x0098, 0x0099, 0x0133, 0x0134, 0x0142, 0x0143, 0x0144, 0x0145, 0x0146, 0x0009});
+       0x0095, 0x0096, 0x0098, 0x0099, 0x0133, 0x0134, 0x0142, 0x0143, 0x0144, 0x0145, 0x0146});
+  s.set_timed({{REG_DISPLAY_FLAGS, 15000}, {REG_CH_MIN_TEMP, 60000}, {REG_CH_MAX_TEMP, 60000}, {REG_OUTDOOR_RESET, 60000},
+               {REG_HEATING_TYPE, 60000}, {REG_VENT_MATERIAL, 60000}, {REG_PREHEAT_ENABLE, 60000}, {REG_INTERVAL, 60000},
+               {REG_PUMP_OVERRUN, 60000}});
+  return s;
+}
+
+uint16_t PollScheduler::next(uint32_t now) {
+  if (!timed_started_) {
+    timed_started_ = true;
+    for (size_t i = 0; i < timed_.size(); i++) timed_[i].last_ms = now + 5000 + 700 * uint32_t(i) - timed_[i].period_ms;
+  }
+  for (auto &t : timed_) {
+    if (now - t.last_ms >= t.period_ms && now - t.last_ms < 0x80000000u) {
+      t.last_ms = now;
+      return t.reg;
+    }
+  }
+  return next();
 }
 
 uint16_t PollScheduler::next() {
@@ -34,7 +52,7 @@ void Poller::disarm_() {
 
 void Poller::fail_write_(const char *why) {
   char b[112];
-  snprintf(b, sizeof(b), "%s setpoint write %04X failed: %s", setpoint_name(wreg_), wval_, why);
+  snprintf(b, sizeof(b), "%s write %04X failed: %s", write_label(wreg_), wval_, why);
   event_(b);
   wstate_ = WState::NONE;
 }
@@ -42,7 +60,7 @@ void Poller::fail_write_(const char *why) {
 WriteResult Poller::request_write(uint32_t now, uint16_t reg, uint16_t val) {
   if (!is_master(now)) return WriteResult::NOT_MASTER;
   if (wstate_ != WState::NONE) return WriteResult::BUSY;
-  if (!is_setpoint_reg(reg) || !setpoint_in_range(reg, decode_setpoint(val))) return WriteResult::OUT_OF_RANGE;
+  if (!is_writable_reg(reg) || (is_setpoint_reg(reg) && !setpoint_in_range(reg, decode_setpoint(val)))) return WriteResult::OUT_OF_RANGE;
   wreg_ = reg;
   wval_ = val;
   wtries_ = 0;
@@ -78,17 +96,17 @@ bool Poller::on_board_response(uint32_t now, const Frame &f) {
       wtries_ = 0;
       wrepeat_at_ = now + cfg_.write_repeat_ms;
       char b[80];
-      snprintf(b, sizeof(b), "%s setpoint write %04X acked, repeating in %u ms", setpoint_name(wreg_), wval_, (unsigned) cfg_.write_repeat_ms);
+      snprintf(b, sizeof(b), "%s write %04X acked, repeating in %u ms", write_label(wreg_), wval_, (unsigned) cfg_.write_repeat_ms);
       event_(b);
     } else if (wstate_ == WState::SEND2) {
       wstate_ = WState::READBACK;
       wtries_ = 0;
-      event_(std::string(setpoint_name(wreg_)) + " setpoint write acked twice, reading back");
+      event_(std::string(write_label(wreg_)) + " write acked twice, reading back");
     }
   } else if (wstate_ == WState::READBACK && inflight_.reg == wreg_) {
     char b[80];
     if (f.val == wval_) {
-      snprintf(b, sizeof(b), "%s setpoint %04X confirmed by read-back", setpoint_name(wreg_), f.val);
+      snprintf(b, sizeof(b), "%s %04X confirmed by read-back", write_label(wreg_), f.val);
       event_(b);
       wstate_ = WState::NONE;
     } else {
@@ -172,7 +190,7 @@ void Poller::update(uint32_t now) {
   if (is_prio) {
     if (!armed_valid_ || armed_ != want) arm_(want);
   } else if (!armed_valid_) {
-    arm_({sched_.next(), 0, 0x11});
+    arm_({sched_.next(now), 0, 0x11});
   }
 }
 
