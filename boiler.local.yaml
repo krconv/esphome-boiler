@@ -174,44 +174,44 @@ time:
 
 sensor:
   - platform: dallas_temp
-    address: 0xda000000db070028
-    name: "Probe 1"
-    update_interval: 5s
-  - platform: dallas_temp
     address: 0xa9000000db97d028
-    name: "Probe 2"
-    update_interval: 5s
-  - platform: dallas_temp
-    address: 0x46000000da8dd828
-    name: "Probe 3"
-    update_interval: 5s
-  - platform: dallas_temp
-    address: 0x7f000000dc2f7c28
-    name: "Probe 4"
+    name: "Basement Supply Temperature"
     update_interval: 5s
   - platform: dallas_temp
     address: 0x79000000d8fafe28
-    name: "Probe 5"
+    name: "Basement Return Temperature"
     update_interval: 5s
   - platform: dallas_temp
-    address: 0xc4000000db7bd928
-    name: "Probe 6"
-    update_interval: 5s
-  - platform: dallas_temp
-    address: 0x66000000dc0c0d28
-    name: "Probe 7"
-    update_interval: 5s
-  - platform: dallas_temp
-    address: 0x30000000dc0deb28
-    name: "Probe 8"
-    update_interval: 5s
-  - platform: dallas_temp
-    address: 0x56000000dc3d2728
-    name: "Probe 9"
+    address: 0x7f000000dc2f7c28
+    name: "First Floor Supply Temperature"
     update_interval: 5s
   - platform: dallas_temp
     address: 0xf5000000db81af28
-    name: "Probe 10"
+    name: "First Floor Return Temperature"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0x46000000da8dd828
+    name: "Second Floor Supply Temperature"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0x56000000dc3d2728
+    name: "Second Floor Return Temperature"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0x66000000dc0c0d28
+    name: "East Wing Supply Temperature"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0xc4000000db7bd928
+    name: "East Wing Return Temperature"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0x30000000dc0deb28
+    name: "Garage Supply Temperature"
+    update_interval: 5s
+  - platform: dallas_temp
+    address: 0xda000000db070028
+    name: "Garage Return Temperature"
     update_interval: 5s
   - platform: copy
     source_id: propane_used
