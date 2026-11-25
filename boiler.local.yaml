@@ -191,11 +191,11 @@ sensor:
     update_interval: 5s
   - platform: dallas_temp
     address: 0x46000000da8dd828
-    name: "Second Floor Supply Temperature"
+    name: "West Wing Supply Temperature"
     update_interval: 5s
   - platform: dallas_temp
     address: 0x56000000dc3d2728
-    name: "Second Floor Return Temperature"
+    name: "West Wing Return Temperature"
     update_interval: 5s
   - platform: dallas_temp
     address: 0x66000000dc0c0d28
