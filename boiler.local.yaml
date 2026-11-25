@@ -262,6 +262,7 @@ switch:
   - platform: template
     name: "Outdoor reset"
     id: sw_outdoor_reset
+    restore_mode: DISABLED  # a restore would call the turn_on/off action at boot = a write to the boiler
     icon: mdi:weather-partly-snowy-rainy
     entity_category: config
     turn_on_action:
@@ -282,6 +283,7 @@ switch:
   - platform: template
     name: "Preheat enabled"
     id: sw_preheat_enabled
+    restore_mode: DISABLED  # a restore would call the turn_on/off action at boot = a write to the boiler
     icon: mdi:calendar-clock
     entity_category: config
     turn_on_action:
@@ -304,6 +306,7 @@ switch:
   - platform: template
     name: "Preheat"
     id: sw_preheat
+    restore_mode: DISABLED  # a restore would call the turn_on/off action at boot = a write to the boiler
     icon: mdi:water-boiler-auto
     turn_on_action:
       - lambda: |-
