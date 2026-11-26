@@ -480,7 +480,7 @@ bool write_value_ok(uint16_t reg, uint16_t mask, uint16_t value) {
     case REG_BURNER_OFF_DIFF: return mask == 0xFFFF && value >= delta_f_to_tenths_c(BURNER_OFF_DIFF_LO_F) && value <= delta_f_to_tenths_c(BURNER_OFF_DIFF_HI_F);
     case REG_BURNER_ON_DIFF: return mask == 0xFFFF && value >= delta_f_to_tenths_c(BURNER_ON_DIFF_LO_F) && value <= delta_f_to_tenths_c(BURNER_ON_DIFF_HI_F);
     case REG_PREHEAT_ENABLE: return mask == PREHEAT_ENABLE_BIT;
-    case REG_DISPLAY_FLAGS: return mask == PREHEAT_ACTIVE_BIT;
+    case REG_DISPLAY_FLAGS: return mask == PREHEAT_ACTIVE_BIT || mask == MASTER_POWER_BIT;
     case REG_INTERVAL: return mask == 0xFFFF && value <= 20;
     case REG_PUMP_OVERRUN:
       if (mask == 0xFF00) return (value >> 8) <= 60;

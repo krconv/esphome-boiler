@@ -229,9 +229,9 @@ constexpr uint16_t REG_HEATING_TYPE = 0x0131, REG_VENT_MATERIAL = 0x0097;  // re
 constexpr uint16_t REG_PREHEAT_ENABLE = 0x0121;                          // 0008 on, 0000 off
 constexpr uint16_t REG_INTERVAL = 0x0108;                                // re-ignite interval, minutes (0..20)
 constexpr uint16_t REG_PUMP_OVERRUN = 0x0122;                            // high byte heating min, low byte hot water min (0..60)
-constexpr uint16_t REG_DISPLAY_FLAGS = 0x0009;                           // high byte bit 0x02 = DHW preheat active
+constexpr uint16_t REG_DISPLAY_FLAGS = 0x0009;                           // bit 0x0001 = boiler master ON/OFF (display power button); bit 0x0200 = DHW preheat active; 0x0030 always set, unknown
 constexpr uint16_t REG_ERROR_HISTORY_FIRST = 0x0142, REG_ERROR_HISTORY_LAST = 0x0146;
-constexpr uint16_t OUTDOOR_RESET_BIT = 0x0080, PREHEAT_ENABLE_BIT = 0x0008, PREHEAT_ACTIVE_BIT = 0x0200;
+constexpr uint16_t OUTDOOR_RESET_BIT = 0x0080, PREHEAT_ENABLE_BIT = 0x0008, PREHEAT_ACTIVE_BIT = 0x0200, MASTER_POWER_BIT = 0x0001;
 // 1:HT Lo (001A) is 80..120 F, 1:HT Hi (0012) 121..180 F (Install manual p.47); stored as deg C rounded to 0.5
 constexpr float CH_MIN_TEMP_LO_C = 26.5f, CH_MIN_TEMP_HI_C = 49.0f, CH_MAX_TEMP_LO_C = 49.5f, CH_MAX_TEMP_HI_C = 82.0f;
 // Registers the poller may write: the setpoints plus the installer settings above.

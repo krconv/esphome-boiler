@@ -480,6 +480,7 @@ static void test_write_setpoint() {
   CHECK(write_value_ok(REG_PUMP_OVERRUN, 0xFF00, 0x1400) && write_value_ok(REG_PUMP_OVERRUN, 0x00FF, 4) && !write_value_ok(REG_PUMP_OVERRUN, 0x00FF, 61) && !write_value_ok(REG_PUMP_OVERRUN, 0xFF00, 0x3D00) && !write_value_ok(REG_PUMP_OVERRUN, 0xFFFF, 0x1403), "pump overrun");
   CHECK(write_value_ok(REG_INTERVAL, 0xFFFF, 4) && !write_value_ok(REG_INTERVAL, 0xFFFF, 21), "interval");
   CHECK(write_value_ok(REG_DISPLAY_FLAGS, 0x0200, 0x0200) && write_value_ok(REG_DISPLAY_FLAGS, 0x0200, 0) && !write_value_ok(REG_DISPLAY_FLAGS, 0xFFFF, 0x0231), "preheat bit only");
+  CHECK(write_value_ok(REG_DISPLAY_FLAGS, 0x0001, 0x0001) && write_value_ok(REG_DISPLAY_FLAGS, 0x0001, 0) && !write_value_ok(REG_DISPLAY_FLAGS, 0x0030, 0x0030) && !write_value_ok(REG_DISPLAY_FLAGS, 0x0201, 0x0201), "master power bit and preheat bit only");
   CHECK(!write_value_ok(REG_OUTDOOR_RESET, 0x0080, 0x80) && !write_value_ok(REG_OUTDOOR_RESET, 0x0080, 0) && !write_value_ok(REG_OUTDOOR_RESET, 0xFFFF, 0) && !is_writable_reg(REG_OUTDOOR_RESET) && write_value_ok(REG_PREHEAT_ENABLE, 0x0008, 8), "outdoor reset is never writable; preheat enable");
   // burner swing (14:SW): F delta <-> tenths of a deg C, as the display writes it
   CHECK(delta_f_to_tenths_c(10) == 55 && delta_f_to_tenths_c(8) == 45 && delta_f_to_tenths_c(30) == 165 && delta_f_to_tenths_c(28) == 155, "burner diff encode matches the display");
