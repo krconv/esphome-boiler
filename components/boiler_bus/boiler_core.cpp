@@ -332,7 +332,7 @@ bool is_known_register(uint16_t r) {
     case 0x0133: case 0x0134: case 0x0135: case 0x0136:
     case 0x0027: case 0x0033: case 0x0132: case 0x0137:
     case 0x0142: case 0x0143: case 0x0144: case 0x0145: case 0x0146:
-    case 0x001A: case 0x0012: case 0x000B: case 0x0131: case 0x0097: case 0x0121: case 0x0108: case 0x0122: case 0x0009:
+    case 0x001A: case 0x0012: case 0x000B: case 0x0131: case 0x0097: case 0x0121: case 0x0108: case 0x0122: case 0x0009: case 0x0123: case 0x0109:
       return true;
     default:
       return false;
@@ -446,11 +446,19 @@ uint16_t encode_temp_c(float c) {
   return uint16_t(((half / 2) << 8) | ((half & 1) ? 0x05 : 0x00));
 }
 
+uint16_t delta_f_to_tenths_c(int f) {
+  // nearest 0.5 deg C (what the display writes): 10 F -> 55, 8 F -> 45, 30 F -> 165, 28 F -> 155
+  const int half_c = (int) std::floor(f * 5.0f / 9.0f * 2.0f + 0.5f);
+  return uint16_t(half_c * 5);
+}
+
+int tenths_c_to_delta_f(uint16_t v) { return (int) std::floor(v / 10.0f * 9.0f / 5.0f + 0.5f); }
+
 bool is_writable_reg(uint16_t reg) {
   switch (reg) {
     case REG_CH_SETPOINT: case REG_DHW_SETPOINT:
-    case REG_CH_MIN_TEMP: case REG_CH_MAX_TEMP: case REG_OUTDOOR_RESET: case REG_PREHEAT_ENABLE: case REG_INTERVAL:
-    case REG_PUMP_OVERRUN: case REG_DISPLAY_FLAGS:
+    case REG_CH_MIN_TEMP: case REG_CH_MAX_TEMP: case REG_PREHEAT_ENABLE: case REG_INTERVAL:
+    case REG_PUMP_OVERRUN: case REG_DISPLAY_FLAGS: case REG_BURNER_OFF_DIFF: case REG_BURNER_ON_DIFF:
       return true;
     default:
       return reg >= REG_ERROR_HISTORY_FIRST && reg <= REG_ERROR_HISTORY_LAST;
@@ -469,7 +477,8 @@ bool write_value_ok(uint16_t reg, uint16_t mask, uint16_t value) {
     case REG_CH_SETPOINT: case REG_DHW_SETPOINT: return mask == 0xFFFF && setpoint_in_range(reg, decode_setpoint(value));
     case REG_CH_MIN_TEMP: return mask == 0xFFFF && temp_value_ok_(value, CH_MIN_TEMP_LO_C, CH_MIN_TEMP_HI_C);
     case REG_CH_MAX_TEMP: return mask == 0xFFFF && temp_value_ok_(value, CH_MAX_TEMP_LO_C, CH_MAX_TEMP_HI_C);
-    case REG_OUTDOOR_RESET: return mask == OUTDOOR_RESET_BIT;
+    case REG_BURNER_OFF_DIFF: return mask == 0xFFFF && value >= delta_f_to_tenths_c(BURNER_OFF_DIFF_LO_F) && value <= delta_f_to_tenths_c(BURNER_OFF_DIFF_HI_F);
+    case REG_BURNER_ON_DIFF: return mask == 0xFFFF && value >= delta_f_to_tenths_c(BURNER_ON_DIFF_LO_F) && value <= delta_f_to_tenths_c(BURNER_ON_DIFF_HI_F);
     case REG_PREHEAT_ENABLE: return mask == PREHEAT_ENABLE_BIT;
     case REG_DISPLAY_FLAGS: return mask == PREHEAT_ACTIVE_BIT;
     case REG_INTERVAL: return mask == 0xFFFF && value <= 20;

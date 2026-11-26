@@ -260,26 +260,6 @@ switch:
 
   # Installer settings. The state is the boiler's read-back, not the last command. Writes (read-modify-write for
   # bit and byte fields) only go out while polling is on and no display is connected, like the setpoints below.
-  - platform: template
-    name: "Outdoor reset"
-    id: sw_outdoor_reset
-    restore_mode: DISABLED  # a restore would call the turn_on/off action at boot = a write to the boiler
-    icon: mdi:weather-partly-snowy-rainy
-    entity_category: config
-    turn_on_action:
-      - lambda: |-
-          auto *hub = id(boiler_bus_hub);
-          if (!hub->write_field(0x000B, 0x0080, 1)) {  // refused: show the real state again
-            float v = hub->read_field(0x000B, 0x0080);
-            if (!std::isnan(v)) id(sw_outdoor_reset).publish_state(v > 0);
-          }
-    turn_off_action:
-      - lambda: |-
-          auto *hub = id(boiler_bus_hub);
-          if (!hub->write_field(0x000B, 0x0080, 0)) {  // refused: show the real state again
-            float v = hub->read_field(0x000B, 0x0080);
-            if (!std::isnan(v)) id(sw_outdoor_reset).publish_state(v > 0);
-          }
 
   - platform: template
     name: "Preheat enabled"
@@ -466,6 +446,46 @@ number:
       - lambda: |-
           if (!id(boiler_bus_hub).write_field(0x0108, 0xFFFF, (uint16_t) x)) id(num_reignite).update();  // refused: show the real value again
 
+  # Registers 0123 / 0109, setting 14:SW (CH burner swing): temperature *differences* in tenths of a deg C, shown in F delta.
+  # No device_class: HA would convert it as an absolute temperature. Ranges are guesses (not confirmed against the display).
+  - platform: template
+    name: "Burner off differential"
+    id: num_burner_off_diff
+    icon: mdi:thermometer-chevron-up
+    entity_category: config
+    unit_of_measurement: "°F"
+    mode: box
+    min_value: 2
+    max_value: 20
+    step: 1
+    update_interval: 5s
+    lambda: |-
+      float v = id(boiler_bus_hub).read_field(0x0123, 0xFFFF);
+      if (std::isnan(v)) return {};
+      return (float) boiler_bus::boiler::tenths_c_to_delta_f((uint16_t) v);
+    set_action:
+      - lambda: |-
+          if (!id(boiler_bus_hub).write_field(0x0123, 0xFFFF, boiler_bus::boiler::delta_f_to_tenths_c((int) x))) id(num_burner_off_diff).update();  // refused: show the real value again
+
+  - platform: template
+    name: "Burner on differential"
+    id: num_burner_on_diff
+    icon: mdi:thermometer-chevron-down
+    entity_category: config
+    unit_of_measurement: "°F"
+    mode: box
+    min_value: 5
+    max_value: 40
+    step: 1
+    update_interval: 5s
+    lambda: |-
+      float v = id(boiler_bus_hub).read_field(0x0109, 0xFFFF);
+      if (std::isnan(v)) return {};
+      return (float) boiler_bus::boiler::tenths_c_to_delta_f((uint16_t) v);
+    set_action:
+      - lambda: |-
+          if (!id(boiler_bus_hub).write_field(0x0109, 0xFFFF, boiler_bus::boiler::delta_f_to_tenths_c((int) x))) id(num_burner_on_diff).update();  // refused: show the real value again
+
 button:
   # writes 0000 to 0142..0146 (the display's "clear history"); the error history sensor shows the read-back
   - platform: template
@@ -481,9 +501,7 @@ interval:
     then:
       - lambda: |-
           auto *hub = id(boiler_bus_hub);
-          float v = hub->read_field(0x000B, 0x0080);
-          if (!std::isnan(v)) id(sw_outdoor_reset).publish_state(v > 0);
-          v = hub->read_field(0x0121, 0x0008);
+          float v = hub->read_field(0x0121, 0x0008);
           if (!std::isnan(v)) id(sw_preheat_enabled).publish_state(v > 0);
           v = hub->read_field(0x0009, 0x0200);
           if (!std::isnan(v)) id(sw_preheat).publish_state(v > 0);

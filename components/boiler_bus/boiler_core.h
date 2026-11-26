@@ -222,7 +222,9 @@ float decode_setpoint(uint16_t v);               // inverse of encode_setpoint (
 
 // ---- installer settings (mapped 11-25, see register_map.md) ---------------------------------------------------
 constexpr uint16_t REG_CH_MIN_TEMP = 0x001A, REG_CH_MAX_TEMP = 0x0012;  // temperature format, deg C
-constexpr uint16_t REG_OUTDOOR_RESET = 0x000B;                           // bit 0x0080
+constexpr uint16_t REG_OUTDOOR_RESET = 0x000B;                           // bit 0x0080; read only (not exposed, never written)
+constexpr uint16_t REG_BURNER_OFF_DIFF = 0x0123, REG_BURNER_ON_DIFF = 0x0109;  // 14:SW burner swing, tenths of a deg C difference
+constexpr int BURNER_OFF_DIFF_LO_F = 2, BURNER_OFF_DIFF_HI_F = 20, BURNER_ON_DIFF_LO_F = 5, BURNER_ON_DIFF_HI_F = 40;  // guessed limits, deg F delta
 constexpr uint16_t REG_HEATING_TYPE = 0x0131, REG_VENT_MATERIAL = 0x0097;  // read only
 constexpr uint16_t REG_PREHEAT_ENABLE = 0x0121;                          // 0008 on, 0000 off
 constexpr uint16_t REG_INTERVAL = 0x0108;                                // re-ignite interval, minutes (0..20)
@@ -238,6 +240,8 @@ bool is_writable_reg(uint16_t reg);
 bool write_value_ok(uint16_t reg, uint16_t mask, uint16_t value);
 // Short name used in write log lines: "CH setpoint", "DHW setpoint", "reg 0122"
 const char *write_label(uint16_t reg);
+uint16_t delta_f_to_tenths_c(int f);  // temperature difference in F -> tenths of a deg C, rounded to the nearest 0.5 C
+int tenths_c_to_delta_f(uint16_t v);   // inverse, rounded to whole F
 uint16_t encode_temp_c(float c);  // nearest 0.5 deg C, no clamp
 
 // register 0010 bits
