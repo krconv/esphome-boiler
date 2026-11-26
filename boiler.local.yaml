@@ -210,19 +210,19 @@ sensor:
     name: "West Wing return temperature"
     update_interval: 5s
   - platform: dallas_temp
-    address: 0x66000000dc0c0d28
+    address: 0x30000000dc0deb28
     name: "East Wing supply temperature"
     update_interval: 5s
   - platform: dallas_temp
-    address: 0xc4000000db7bd928
+    address: 0xda000000db070028
     name: "East Wing return temperature"
     update_interval: 5s
   - platform: dallas_temp
-    address: 0x30000000dc0deb28
+    address: 0x66000000dc0c0d28
     name: "Garage supply temperature"
     update_interval: 5s
   - platform: dallas_temp
-    address: 0xda000000db070028
+    address: 0xc4000000db7bd928
     name: "Garage return temperature"
     update_interval: 5s
   - platform: copy
