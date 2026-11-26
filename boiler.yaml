@@ -304,7 +304,7 @@ switch:
             if (!std::isnan(v)) id(sw_power).publish_state(v > 0);
           }
 
-  # Hot water preheat running now (register 0009, bit 0x0200).
+  # Hot water preheat running now (register 0009, bit 0x0200). The display sets it from its own schedule;
   # this switch lets Home Assistant run the schedule instead. Every other bit of 0009 is left alone.
   - platform: template
     name: "Preheat"
