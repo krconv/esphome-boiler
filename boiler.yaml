@@ -462,10 +462,10 @@ number:
     lambda: |-
       float v = id(boiler_bus_hub).read_field(0x0123, 0xFFFF);
       if (std::isnan(v)) return {};
-      return (float) boiler_bus::boiler::tenths_c_to_delta_f((uint16_t) v);
+      return (float) ::boiler::tenths_c_to_delta_f((uint16_t) v);
     set_action:
       - lambda: |-
-          if (!id(boiler_bus_hub).write_field(0x0123, 0xFFFF, boiler_bus::boiler::delta_f_to_tenths_c((int) x))) id(num_burner_off_diff).update();  // refused: show the real value again
+          if (!id(boiler_bus_hub).write_field(0x0123, 0xFFFF, ::boiler::delta_f_to_tenths_c((int) x))) id(num_burner_off_diff).update();  // refused: show the real value again
 
   - platform: template
     name: "Burner on differential"
@@ -481,10 +481,10 @@ number:
     lambda: |-
       float v = id(boiler_bus_hub).read_field(0x0109, 0xFFFF);
       if (std::isnan(v)) return {};
-      return (float) boiler_bus::boiler::tenths_c_to_delta_f((uint16_t) v);
+      return (float) ::boiler::tenths_c_to_delta_f((uint16_t) v);
     set_action:
       - lambda: |-
-          if (!id(boiler_bus_hub).write_field(0x0109, 0xFFFF, boiler_bus::boiler::delta_f_to_tenths_c((int) x))) id(num_burner_on_diff).update();  // refused: show the real value again
+          if (!id(boiler_bus_hub).write_field(0x0109, 0xFFFF, ::boiler::delta_f_to_tenths_c((int) x))) id(num_burner_on_diff).update();  // refused: show the real value again
 
 button:
   # writes 0000 to 0142..0146 (the display's "clear history"); the error history sensor shows the read-back
