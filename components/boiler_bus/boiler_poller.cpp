@@ -174,7 +174,13 @@ void Poller::on_board_unsolicited(uint32_t now, const Frame &f) {
   // the board only sends its 0020 presence frame when no master is talking to it
   if (mode_ != PollMode::FAST || f.reg != ST_SPARK || !f.from_board()) return;
   if (now - answered_ms_ < cfg_.presence_guard_ms) return;
-  lose_(now, "board idle (presence frame)", true);
+  // 0020 is also the supply-temperature register we poll: a late reply to our own 0020 request looks the same as the
+  // board's idle frame. Only believe "idle" when we have not sent anything lately either.
+  if (last_sent_valid_ && now - last_sent_ms_ < cfg_.presence_guard_ms) return;
+  char why[96];
+  snprintf(why, sizeof(why), "board idle (presence frame; %u ms since answer, %u ms since send, %u misses)", (unsigned) (now - answered_ms_),
+           (unsigned) (last_sent_valid_ ? now - last_sent_ms_ : 0), (unsigned) misses_);
+  lose_(now, why, true);
 }
 
 void Poller::update(uint32_t now) {

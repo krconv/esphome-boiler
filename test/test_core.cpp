@@ -623,6 +623,18 @@ static void test_poller() {
     s.p.on_board_unsolicited(s.t, pres);
     CHECK(s.p.mode() == PollMode::FAST, "recent answer: stay joined");
   }
+  {  // a late reply to our own 0020 request (answer timeout passed, last answer > 1 s ago) is not an idle presence frame
+    Sim s;
+    s.p.update(s.t);
+    s.fire(); s.t += 80; s.answer(1); s.p.update(s.t);
+    s.p.take_events();
+    s.t += 900;
+    s.fire(); s.t += 300; s.p.update(s.t);  // sent, timed out
+    Frame late; late.addr1 = 0x51; late.addr2 = 0xA1; late.type = 0x11; late.sub = 0x11; late.reg = 0x0020; late.val = 1;
+    s.t += 100;
+    s.p.on_board_unsolicited(s.t, late);
+    CHECK(s.p.mode() == PollMode::FAST, "late reply to our request: stay joined");
+  }
   {  // watchdog: joined, requests keep being sent but nothing resets the miss count for 10 s (misses reset by hand)
     Sim s;
     PollerConfig c;
