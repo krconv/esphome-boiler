@@ -257,7 +257,6 @@ void BoilerBus::handle_burst_(const boiler::BurstResult &br) {
   switch (br.status) {
     case ParseStatus::OK: {
       this->last_burst_board_ = !own && br.frame.from_board();
-      this->last_burst_own_ = own;
       if (!own && esp_timer_get_time() - this->last_ok_trace_us_ > 10000000) this->queue_trace_(br, false, 20);
       QItem it{};
       it.own = own;
@@ -272,7 +271,6 @@ void BoilerBus::handle_burst_(const boiler::BurstResult &br) {
     default: label = "format"; break;
   }
   this->last_burst_board_ = false;
-  this->last_burst_own_ = own;
   const int64_t now_us = esp_timer_get_time();
   if (!own) {
     if (br.status == ParseStatus::CRC_ERROR) {
@@ -366,10 +364,11 @@ void BoilerBus::tx_service_(bool drained) {
   const uint64_t since = this->bursts_->seen_dip() ? this->bursts_->last_dip_index() : 0;
   const float idle_us = float(this->dips_->index() - since) * this->us_per_sample_;
   // only ever in the gap after a board frame: a 31 ms frame has to end before the board's next one starts
-  // joined: after our own request that drew no reply nothing else will start a burst (the board only talks when asked, apart
-  // from its idle frame every ~3 s), so waiting for a board frame would stall polling until that idle frame and force a rejoin.
-  // The board answers within ~60 ms; once we have heard nothing for FAST_RETRY_US the bus is ours to try again.
-  const bool retry = this->tx_fast_.load() && this->last_burst_own_ && idle_us >= (float) FAST_RETRY_US;
+  // joined: after our own request that drew no usable reply (none at all, or one the sampler lost bits of, e.g. while a 1-Wire
+  // read held off interrupts) nothing else starts a burst (the board only talks when asked, apart from its idle frame every
+  // ~3 s), so waiting for a board frame would stall polling until that idle frame and force a rejoin. The board answers
+  // within ~60 ms; once the bus has been quiet for FAST_RETRY_US it is ours to try again.
+  const bool retry = this->tx_fast_.load() && !this->last_burst_board_ && idle_us >= (float) FAST_RETRY_US;
   if (!retry && (!this->last_burst_board_ || idle_us < (float) this->tx_req_min_us_.load())) return;
   if (idle_us > (float) this->tx_req_max_us_.load()) return;
   boiler::Frame f = (word & 0xFF00000000ull) == 0x1000000000ull ? boiler::make_write_request((uint16_t)(word >> 16), (uint16_t) word)

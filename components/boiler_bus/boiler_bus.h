@@ -205,7 +205,6 @@ class BoilerBus : public Component {
   uint32_t tx_len_{0};
   std::vector<float> tx_depths_;
   bool last_burst_board_{false};
-  bool last_burst_own_{false};
   std::atomic<bool> tx_fast_{false};
   float us_per_sample_{10.0f};
   std::atomic<uint32_t> tx_count_{0};
