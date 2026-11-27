@@ -28,6 +28,7 @@ static constexpr size_t TRACE_SAMPLES = 248;
 // transmit guards (see boiler_core.h for the pulse limits)
 // (the minimum spacing between transmissions is tx_min_spacing_us_, never below 120 ms: the display itself does ~7.7 requests/s)
 static constexpr uint32_t PING_WINDOW_US = 6000;     // ping slot: fire within this long after the configured quiet time
+static constexpr uint32_t FAST_RETRY_US = 200000;     // joined: quiet time after our own unanswered request before we try again
 static constexpr uint32_t FAST_WINDOW_US = 1000000;  // joined: fire any time up to 1 s after the board's reply
 static constexpr uint32_t TX_PROBE_TAIL_US = 6000;        // sample window kept after a test pattern
 static constexpr uint32_t TX_PROBE_TAIL_FRAME_US = 2500;  // ... after a frame (next display request is >= 44 ms after the reply)
@@ -256,6 +257,7 @@ void BoilerBus::handle_burst_(const boiler::BurstResult &br) {
   switch (br.status) {
     case ParseStatus::OK: {
       this->last_burst_board_ = !own && br.frame.from_board();
+      this->last_burst_own_ = own;
       if (!own && esp_timer_get_time() - this->last_ok_trace_us_ > 10000000) this->queue_trace_(br, false, 20);
       QItem it{};
       it.own = own;
@@ -270,6 +272,7 @@ void BoilerBus::handle_burst_(const boiler::BurstResult &br) {
     default: label = "format"; break;
   }
   this->last_burst_board_ = false;
+  this->last_burst_own_ = own;
   const int64_t now_us = esp_timer_get_time();
   if (!own) {
     if (br.status == ParseStatus::CRC_ERROR) {
@@ -363,7 +366,12 @@ void BoilerBus::tx_service_(bool drained) {
   const uint64_t since = this->bursts_->seen_dip() ? this->bursts_->last_dip_index() : 0;
   const float idle_us = float(this->dips_->index() - since) * this->us_per_sample_;
   // only ever in the gap after a board frame: a 31 ms frame has to end before the board's next one starts
-  if (!this->last_burst_board_ || idle_us < (float) this->tx_req_min_us_.load() || idle_us > (float) this->tx_req_max_us_.load()) return;
+  // joined: after our own request that drew no reply nothing else will start a burst (the board only talks when asked, apart
+  // from its idle frame every ~3 s), so waiting for a board frame would stall polling until that idle frame and force a rejoin.
+  // The board answers within ~60 ms; once we have heard nothing for FAST_RETRY_US the bus is ours to try again.
+  const bool retry = this->tx_fast_.load() && this->last_burst_own_ && idle_us >= (float) FAST_RETRY_US;
+  if (!retry && (!this->last_burst_board_ || idle_us < (float) this->tx_req_min_us_.load())) return;
+  if (idle_us > (float) this->tx_req_max_us_.load()) return;
   boiler::Frame f = (word & 0xFF00000000ull) == 0x1000000000ull ? boiler::make_write_request((uint16_t)(word >> 16), (uint16_t) word)
                                                                 : boiler::make_read_request((uint16_t)(word >> 16));
   uint8_t bytes[boiler::FRAME_BYTES];
@@ -928,6 +936,7 @@ void BoilerBus::poll_timing_() {
   const bool fast = this->poller_.mode() == boiler::PollMode::FAST;
   const uint32_t lo = fast ? this->fast_gap_us_ : this->ping_delay_us_;
   this->tx_req_min_us_.store(lo);
+  this->tx_fast_.store(fast);
   this->tx_req_max_us_.store(lo + (fast ? FAST_WINDOW_US : PING_WINDOW_US));
 }
 
