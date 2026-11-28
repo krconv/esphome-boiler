@@ -436,9 +436,10 @@ void BoilerBus::on_probe_read_(const QItem &it) {
 
 namespace {
 // dallas_temp keeps the address and the bus private to the sensor; we need both to talk to the probe ourselves.
-struct ProbeAccess : public dallas_temp::DallasTemperatureSensor {
-  static uint64_t address(dallas_temp::DallasTemperatureSensor *s) { return s->*(&ProbeAccess::address_); }
-  static one_wire::OneWireBus *bus(dallas_temp::DallasTemperatureSensor *s) { return s->*(&ProbeAccess::bus_); }
+// (the sensor class is final, so go through its one_wire::OneWireDevice base)
+struct ProbeAccess : public one_wire::OneWireDevice {
+  static uint64_t address(one_wire::OneWireDevice *d) { return d->*(&ProbeAccess::address_); }
+  static one_wire::OneWireBus *bus(one_wire::OneWireDevice *d) { return d->*(&ProbeAccess::bus_); }
 };
 }  // namespace
 
@@ -1119,9 +1120,10 @@ void BoilerBus::publish_diagnostics_(uint32_t now) {
 }
 
 void BoilerBus::dump_config() {
-  if (!this->probes_.empty())
+  if (!this->probes_.empty()) {
     ESP_LOGCONFIG(TAG, "  1-Wire probes: %u, one cycle every %u ms, read only in quiet slots of the bus", (unsigned) this->probes_.size(),
                   (unsigned) this->probe_interval_ms_);
+  }
   ESP_LOGCONFIG(TAG, "Boiler bus (display-link decoder and poller):");
   ESP_LOGCONFIG(TAG, "  ADC pin: GPIO%u, %u samples/s, ~%.3f mV/count", this->adc_pin_, (unsigned) this->sample_rate_, this->mv_per_count_);
   ESP_LOGCONFIG(TAG, "  TX pin: GPIO%u (LOW unless a request is sent; RMT %s; dip %u us, HIGH <= %u us per dip, <= %u us total)", this->tx_pin_,
