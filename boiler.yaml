@@ -186,6 +186,8 @@ time:
     id: ha_time
 
 sensor:
+# Probe calibration offsets (deg C; dallas_temp reports C). From the 2026-11-27 circulation test and equilibrium
+# windows; details in /workspace/boiler/cal/probes/RESULTS.md. Basement supply and the other probes get none.
   - platform: dallas_temp
     address: 0xa9000000db97d028
     name: "Basement supply temperature"
@@ -198,6 +200,8 @@ sensor:
     address: 0x7f000000dc2f7c28
     name: "First Floor supply temperature"
     update_interval: 5s
+    filters:
+      - offset: 0.222
   - platform: dallas_temp
     address: 0xf5000000db81af28
     name: "First Floor return temperature"
@@ -206,6 +210,8 @@ sensor:
     address: 0x46000000da8dd828
     name: "West Wing supply temperature"
     update_interval: 5s
+    filters:
+      - offset: -0.333
   - platform: dallas_temp
     address: 0x56000000dc3d2728
     name: "West Wing return temperature"
@@ -214,6 +220,8 @@ sensor:
     address: 0x30000000dc0deb28
     name: "East Wing supply temperature"
     update_interval: 5s
+    filters:
+      - offset: 0.167
   - platform: dallas_temp
     address: 0xda000000db070028
     name: "East Wing return temperature"
@@ -222,10 +230,14 @@ sensor:
     address: 0x66000000dc0c0d28
     name: "Garage supply temperature"
     update_interval: 5s
+    filters:
+      - offset: -0.111
   - platform: dallas_temp
     address: 0xc4000000db7bd928
     name: "Garage return temperature"
     update_interval: 5s
+    filters:
+      - offset: 0.611
   - platform: copy
     source_id: propane_used
     name: "Propane gas used"
