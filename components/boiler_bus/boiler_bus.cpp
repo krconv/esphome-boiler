@@ -30,6 +30,12 @@ static constexpr size_t TRACE_SAMPLES = 248;
 static constexpr uint32_t PING_WINDOW_US = 6000;     // ping slot: fire within this long after the configured quiet time
 static constexpr uint32_t FAST_RETRY_US = 200000;     // joined: quiet time after our own unanswered request before we try again
 static constexpr uint32_t FAST_WINDOW_US = 1000000;  // joined: fire any time up to 1 s after the board's reply
+// 1-Wire probe slots (see probe_service_)
+static constexpr uint32_t PROBE_MIN_IDLE_US = 3000;       // the board frame is decoded; start no sooner than this after its last dip
+static constexpr uint32_t PROBE_OP_US = 14000;            // worst case for one transaction (a scratchpad read is ~11 ms)
+static constexpr uint32_t DISPLAY_GAP_US = 44000;         // a display's next request starts >= 44 ms after the board's reply
+static constexpr uint32_t PROBE_PING_MAX_IDLE_US = 2000000;  // not joined: the board's next unsolicited frame is ~3 s after the last
+static constexpr uint32_t PROBE_PING_OPS = 12;            // not joined: transactions per board frame (they are rare there)
 static constexpr uint32_t TX_PROBE_TAIL_US = 6000;        // sample window kept after a test pattern
 static constexpr uint32_t TX_PROBE_TAIL_FRAME_US = 2500;  // ... after a frame (next display request is >= 44 ms after the reply)
 static constexpr float TX_PROBE_MIN_DEPTH = 40.0f;        // counts (~32 mV): a dip must go this far below baseline
@@ -44,6 +50,7 @@ void BoilerBus::drive_tx_low_() {
 }
 
 void BoilerBus::setup() {
+  if (!this->probes_.empty()) this->cycle_ = new boiler::ProbeCycle(this->probes_.size(), this->probe_interval_ms_);
   this->drive_tx_low_();
   this->us_per_sample_ = 1e6f / (float) this->sample_rate_;
   // NB: no gpio_set_direction() after this: it would disconnect the RMT output from the pin
@@ -211,6 +218,7 @@ void BoilerBus::sampler_loop_() {
     }
     boiler::BurstResult br;
     if (this->bursts_->on_idle(this->dips_->index(), &br)) this->handle_burst_(br);
+    this->probe_service_(n < sizeof(buf));
     this->tx_service_(n < sizeof(buf));
     if ((++blocks & 15) == 0) {
       this->baseline_counts_.store(this->dips_->baseline(), std::memory_order_relaxed);
@@ -346,6 +354,99 @@ void BoilerBus::queue_trace_(const boiler::BurstResult &br, bool bad, int bitpos
   this->enqueue_(it);
 }
 
+// quiet time as the sampler sees it; with no dip ever seen it is the time since sampling started
+float BoilerBus::idle_us_() const {
+  const uint64_t since = this->bursts_->seen_dip() ? this->bursts_->last_dip_index() : 0;
+  return float(this->dips_->index() - since) * this->us_per_sample_;
+}
+
+// ---- 1-Wire probes (sampler task) ------------------------------------------------------
+// A bit-banged 1-Wire transaction holds interrupts off and corrupts any boiler frame that arrives meanwhile, so none
+// runs on its own schedule (the sensors' update_interval is `never`). Instead one transaction is done here, in the
+// quiet slot right after a board frame has been decoded, before tx_service_ (which therefore cannot start a request
+// meanwhile: both run in this task). Joined: the board has nothing more to say until we ask again, and the transaction
+// ends before our request at fast_gap. A display's next request is >= 44 ms after the board's reply, so the same holds
+// with a display present. Not joined: the board's unsolicited frames are ~3 s apart, so a few transactions fit.
+void BoilerBus::probe_service_(bool drained) {
+  if (!drained || !this->cycle_ || !this->probes_go_.load(std::memory_order_relaxed)) return;
+  if (this->tx_active_ || !this->last_burst_board_ || this->dips_->in_dip() || !this->bursts_->seen_dip()) return;
+  const bool fast = this->tx_fast_.load();
+  const bool display = this->display_present_.load();
+  const float idle = this->idle_us_();
+  if (idle < (float) PROBE_MIN_IDLE_US) return;
+  uint32_t limit, budget;
+  if (fast) {
+    limit = this->tx_req_min_us_.load();
+    budget = 1;
+  } else if (display) {
+    limit = DISPLAY_GAP_US;
+    budget = 1;
+  } else {
+    limit = PROBE_PING_MAX_IDLE_US;
+    budget = PROBE_PING_OPS;
+  }
+  if (idle + (float) PROBE_OP_US > (float) limit) return;
+  const uint64_t slot = this->bursts_->last_dip_index();
+  if (slot != this->probe_slot_dip_) {
+    this->probe_slot_dip_ = slot;
+    this->probe_slot_ops_ = 0;
+  }
+  if (this->probe_slot_ops_ >= budget) return;
+  const uint32_t now = millis();
+  size_t idx = 0;
+  const auto op = this->cycle_->next(now, &idx);
+  if (op == boiler::ProbeCycle::Op::NONE) return;
+  this->probe_slot_ops_++;
+  if (op == boiler::ProbeCycle::Op::CONVERT) {
+    bool ok = this->ow_bus_->skip();  // reset + skip ROM: every probe starts converting
+    if (ok) this->ow_bus_->write8(0x44);
+    this->cycle_->done(op, ok, millis());
+    return;
+  }
+  QItem it{};
+  it.kind = Kind::PROBE;
+  it.found = (uint32_t) idx;
+  it.t_ms = now;
+  uint8_t *sp = reinterpret_cast<uint8_t *>(it.info);
+  bool ok = this->ow_bus_->select(this->probes_[idx].address);
+  if (ok) {
+    this->ow_bus_->write8(0xBE);  // read scratchpad
+    for (int i = 0; i < 9; i++) sp[i] = this->ow_bus_->read8();
+  }
+  it.expected = ok ? 1 : 0;
+  this->cycle_->done(op, ok, millis());
+  this->enqueue_(it);
+}
+
+// main loop: publish through the dallas sensor (its filters, e.g. calibration offsets, apply)
+void BoilerBus::on_probe_read_(const QItem &it) {
+  if (it.found >= this->probes_.size()) return;
+  auto &p = this->probes_[it.found];
+  bool crc = false;
+  float t = it.expected ? boiler::probe_temp_c(reinterpret_cast<const uint8_t *>(it.info), &crc) : NAN;
+  const uint32_t now = millis();
+  if (crc) {
+    p.ok_ms = now;
+    p.sensor->publish_state(t);
+    return;
+  }
+  ESP_LOGD(TAG, "probe %u: read failed (%s)", (unsigned) it.found, it.expected ? "bad CRC" : "no presence");
+  if (now - p.ok_ms > 60000) p.sensor->publish_state(NAN);  // nothing good for a minute: stop showing the old value
+}
+
+namespace {
+// dallas_temp keeps the address and the bus private to the sensor; we need both to talk to the probe ourselves.
+struct ProbeAccess : public dallas_temp::DallasTemperatureSensor {
+  static uint64_t address(dallas_temp::DallasTemperatureSensor *s) { return s->*(&ProbeAccess::address_); }
+  static one_wire::OneWireBus *bus(dallas_temp::DallasTemperatureSensor *s) { return s->*(&ProbeAccess::bus_); }
+};
+}  // namespace
+
+void BoilerBus::add_probe(dallas_temp::DallasTemperatureSensor *s) {
+  this->probes_.push_back({s, ProbeAccess::address(s), 0});
+  if (!this->ow_bus_) this->ow_bus_ = ProbeAccess::bus(s);
+}
+
 // ---- transmit (sampler task) ----------------------------------------------------------
 // Fire only when the bus has been quiet for a while, as seen by the sampler. The DMA delivers samples in 1.28 ms
 // chunks and we only look after draining it, so the real quiet time is >= the measured one.
@@ -360,9 +461,7 @@ void BoilerBus::tx_service_(bool drained) {
   if (!(word >> 63)) return;
   if (this->dips_->in_dip()) return;
   if (now - this->last_tx_us_ < (int64_t) this->tx_min_spacing_us_.load()) return;
-  // quiet time as the sampler sees it; with no dip ever seen it is the time since sampling started
-  const uint64_t since = this->bursts_->seen_dip() ? this->bursts_->last_dip_index() : 0;
-  const float idle_us = float(this->dips_->index() - since) * this->us_per_sample_;
+  const float idle_us = this->idle_us_();
   // only ever in the gap after a board frame: a 31 ms frame has to end before the board's next one starts
   // joined: after our own request that drew no usable reply (none at all, or one the sampler lost bits of, e.g. while a 1-Wire
   // read held off interrupts) nothing else starts a burst (the board only talks when asked, apart from its idle frame every
@@ -493,10 +592,16 @@ void BoilerBus::loop() {
         if (s) s->publish_state(it.info);
         break;
       }
+      case Kind::PROBE: this->on_probe_read_(it); break;
       default: this->on_tx_event_(it); break;
     }
   }
   const uint32_t now = millis();
+  if (!this->probes_go_.load(std::memory_order_relaxed)) {
+    // every setup() has run (the probes' own included): the sampler may start using the 1-Wire bus
+    for (auto &p : this->probes_) p.ok_ms = now;
+    this->probes_go_.store(true);
+  }
   this->regchg_publish_(now);
   this->poll_tick_(now);
   if (now - this->last_tick_ms_ >= 1000) {
@@ -946,6 +1051,7 @@ void BoilerBus::poll_tick_(uint32_t now) {
   const int disp = this->poller_.display_present(now) ? 1 : 0;
   if (disp != this->last_display_state_) {
     this->last_display_state_ = disp;
+    this->display_present_.store(disp != 0);
     if (this->display_connected_binary_sensor_) this->display_connected_binary_sensor_->publish_state(disp);
   }
   for (const auto &e : this->poller_.take_events()) {
@@ -1013,6 +1119,9 @@ void BoilerBus::publish_diagnostics_(uint32_t now) {
 }
 
 void BoilerBus::dump_config() {
+  if (!this->probes_.empty())
+    ESP_LOGCONFIG(TAG, "  1-Wire probes: %u, one cycle every %u ms, read only in quiet slots of the bus", (unsigned) this->probes_.size(),
+                  (unsigned) this->probe_interval_ms_);
   ESP_LOGCONFIG(TAG, "Boiler bus (display-link decoder and poller):");
   ESP_LOGCONFIG(TAG, "  ADC pin: GPIO%u, %u samples/s, ~%.3f mV/count", this->adc_pin_, (unsigned) this->sample_rate_, this->mv_per_count_);
   ESP_LOGCONFIG(TAG, "  TX pin: GPIO%u (LOW unless a request is sent; RMT %s; dip %u us, HIGH <= %u us per dip, <= %u us total)", this->tx_pin_,

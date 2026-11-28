@@ -16,6 +16,10 @@
 #include "boiler_core.h"
 #include "boiler_poller.h"
 #include "boiler_errors.h"
+#include "boiler_probe.h"
+
+#include "esphome/components/dallas_temp/dallas_temp.h"
+#include "esphome/components/one_wire/one_wire_bus.h"
 
 #include <vector>
 
@@ -65,6 +69,12 @@ class BoilerBus : public Component {
   void set_fan_stale_ms(uint32_t v) { this->fan_stale_ms_ = v; }
   void set_log_frames(bool v) { this->log_frames_ = v; }
 
+  // ---- 1-Wire probes, read only in quiet slots of the bus ----
+  // The dallas_temp sensors must have `update_interval: never`; this component converts and reads them itself (see
+  // probe_service_) and publishes through each sensor, so its filters apply. One probe per entry, in YAML order.
+  void add_probe(dallas_temp::DallasTemperatureSensor *s);
+  void set_probe_interval_ms(uint32_t ms) { this->probe_interval_ms_ = ms; }
+
   // ---- bus master (poller); called from the main loop / HA entities ----
   // GPIO32 only ever goes HIGH inside a pulse list that boiler::tx_pulses_safe() accepted.
   void set_ping_delay_ms(uint32_t ms) { this->ping_delay_us_ = ms * 1000u; }  // quiet time after a board frame, no display
@@ -102,7 +112,7 @@ class BoilerBus : public Component {
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
  protected:
-  enum class Kind : uint8_t { FRAME, MALFORMED, TX_DEPTH, TX_SENT, TRACE, COMPARE };
+  enum class Kind : uint8_t { FRAME, MALFORMED, TX_DEPTH, TX_SENT, TRACE, COMPARE, PROBE };
   struct QItem {
     boiler::Frame frame;
     uint32_t t_ms;
@@ -122,6 +132,9 @@ class BoilerBus : public Component {
   void enqueue_(const QItem &it);
   bool tx_init_();
   void tx_service_(bool drained);
+  float idle_us_() const;
+  void probe_service_(bool drained);
+  void on_probe_read_(const QItem &it);
   bool tx_fire_(const std::vector<boiler::TxPulse> &p, bool is_frame, uint32_t expect_dips);
   void tx_probe_push_(uint64_t idx, uint16_t x);
   void tx_finish_();
@@ -208,6 +221,22 @@ class BoilerBus : public Component {
   std::atomic<bool> tx_fast_{false};
   float us_per_sample_{10.0f};
   std::atomic<uint32_t> tx_count_{0};
+
+  // 1-Wire probes. Sampler task: cycle_ and the *_slot_ fields (bus access happens there, and nowhere else once running).
+  // Main loop: the sensors, probe_ok_ms_.
+  struct Probe {
+    dallas_temp::DallasTemperatureSensor *sensor;
+    uint64_t address;
+    uint32_t ok_ms;  // main loop: last good read
+  };
+  std::vector<Probe> probes_;
+  one_wire::OneWireBus *ow_bus_{nullptr};
+  uint32_t probe_interval_ms_{5000};
+  boiler::ProbeCycle *cycle_{nullptr};
+  std::atomic<bool> probes_go_{false};       // set by the first loop(): every component's setup() (incl. the bus scan) is done
+  std::atomic<bool> display_present_{false};
+  uint64_t probe_slot_dip_{0};               // last_dip_index of the board frame whose quiet slot we already used
+  uint32_t probe_slot_ops_{0};
 
   // poller (main loop)
   boiler::Poller poller_{boiler::PollerConfig(), boiler::PollScheduler::defaults()};

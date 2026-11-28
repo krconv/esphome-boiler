@@ -11,6 +11,7 @@
 #include "../components/boiler_bus/boiler_core.h"
 #include "../components/boiler_bus/boiler_poller.h"
 #include "../components/boiler_bus/boiler_errors.h"
+#include "../components/boiler_bus/boiler_probe.h"
 
 using namespace boiler;
 
@@ -899,6 +900,45 @@ static void test_errors() {
   CHECK(!last_error_code(h, seen, &c), "unseen");
 }
 
+static void test_probes() {
+  using boiler::ProbeCycle;
+  using Op = ProbeCycle::Op;
+  const uint8_t sp[9] = {0x50, 0x05, 0x4B, 0x46, 0x7F, 0xFF, 0x0C, 0x10, 0x1C};  // datasheet example
+  bool ok = false;
+  float t = boiler::probe_temp_c(sp, &ok);
+  CHECK(ok && std::fabs(t - 85.0f) < 1e-4, "datasheet scratchpad %d %f", (int) ok, t);
+  uint8_t bad[9];
+  std::copy(sp, sp + 9, bad);
+  bad[0] ^= 1;
+  boiler::probe_temp_c(bad, &ok);
+  CHECK(!ok, "flipped bit fails the CRC");
+
+  ProbeCycle c(3, 5000, 800);
+  size_t i = 99;
+  CHECK(c.next(0, &i) == Op::CONVERT, "first slot converts");
+  c.done(Op::CONVERT, true, 0);
+  CHECK(c.next(100, &i) == Op::NONE, "no read while converting");
+  CHECK(c.next(799, &i) == Op::NONE, "no read before 800 ms");
+  for (size_t k = 0; k < 3; k++) {
+    CHECK(c.next(900 + 250 * k, &i) == Op::READ && i == k, "read probe %zu", k);
+    c.done(Op::READ, true, 900 + 250 * k);
+  }
+  CHECK(c.next(1700, &i) == Op::NONE, "cycle done, wait for the period");
+  CHECK(c.next(4999, &i) == Op::NONE, "period not over");
+  CHECK(c.next(5000, &i) == Op::CONVERT, "next cycle after the period");
+  c.done(Op::CONVERT, false, 5000);
+  CHECK(c.next(5400, &i) == Op::NONE, "failed convert retries after 500 ms");
+  CHECK(c.next(5500, &i) == Op::CONVERT, "retry");
+  c.done(Op::CONVERT, true, 5500);
+  CHECK(c.next(5500 + 800, &i) == Op::READ && i == 0, "reads restart at 0");
+  // millis() wrap
+  ProbeCycle w(1, 5000, 800);
+  w.done(Op::CONVERT, true, 0xFFFFFF00u);
+  CHECK(w.next(0xFFFFFF00u + 900u, &i) == Op::READ, "wraps");
+  w.done(Op::READ, true, 0);
+  CHECK(w.next(0xFFFFFF00u + 4000u, &i) == Op::NONE && w.next(0xFFFFFF00u + 5000u, &i) == Op::CONVERT, "period across wrap");
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) { fprintf(stderr, "usage: %s frames.log...\n", argv[0]); return 2; }
   printf("[1] captured frames\n");
@@ -919,6 +959,8 @@ int main(int argc, char **argv) {
   test_write_setpoint();
   test_scheduler();
   test_poller();
+  printf("[10] probe schedule\n");
+  test_probes();
   printf("[9] error table\n");
   test_errors();
   printf("\nASSERTIONS: %d passed, %d failed\n", g_pass, g_fail);

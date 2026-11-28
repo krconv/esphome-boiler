@@ -86,6 +86,9 @@ boiler_bus:
   id: boiler_bus_hub
   adc_pin: GPIO35
   tx_pin: GPIO32
+  # 1-Wire probes are converted and read only in quiet slots of the bus (a bit-banged read corrupts any board reply that
+  # arrives meanwhile). The dallas_temp sensors below therefore use update_interval: never.
+  probes: [probe_1, probe_2, probe_3, probe_4, probe_5, probe_6, probe_7, probe_8, probe_9, probe_10]
   # log_frames: true   # with logger level DEBUG: print every decoded frame
 
   # status register 0010
@@ -189,53 +192,73 @@ sensor:
 # Probe calibration offsets (deg C; dallas_temp reports C). From the 2026-11-27 circulation test and equilibrium
 # windows; details in /workspace/boiler/cal/probes/RESULTS.md. Basement supply and the other probes get none.
   - platform: dallas_temp
+    id: probe_1
     address: 0xa9000000db97d028
     name: "Basement supply temperature"
-    update_interval: 5s
+    update_interval: never   # read by boiler_bus in quiet slots of the bus (probes: below)
+    force_update: true
   - platform: dallas_temp
+    id: probe_2
     address: 0x79000000d8fafe28
     name: "Basement return temperature"
-    update_interval: 5s
+    update_interval: never   # read by boiler_bus in quiet slots of the bus (probes: below)
+    force_update: true
   - platform: dallas_temp
+    id: probe_3
     address: 0x7f000000dc2f7c28
     name: "First Floor supply temperature"
-    update_interval: 5s
+    update_interval: never   # read by boiler_bus in quiet slots of the bus (probes: below)
+    force_update: true
     filters:
       - offset: 0.222
   - platform: dallas_temp
+    id: probe_4
     address: 0xf5000000db81af28
     name: "First Floor return temperature"
-    update_interval: 5s
+    update_interval: never   # read by boiler_bus in quiet slots of the bus (probes: below)
+    force_update: true
   - platform: dallas_temp
+    id: probe_5
     address: 0x46000000da8dd828
     name: "West Wing supply temperature"
-    update_interval: 5s
+    update_interval: never   # read by boiler_bus in quiet slots of the bus (probes: below)
+    force_update: true
     filters:
       - offset: -0.333
   - platform: dallas_temp
+    id: probe_6
     address: 0x56000000dc3d2728
     name: "West Wing return temperature"
-    update_interval: 5s
+    update_interval: never   # read by boiler_bus in quiet slots of the bus (probes: below)
+    force_update: true
   - platform: dallas_temp
+    id: probe_7
     address: 0x30000000dc0deb28
     name: "East Wing supply temperature"
-    update_interval: 5s
+    update_interval: never   # read by boiler_bus in quiet slots of the bus (probes: below)
+    force_update: true
     filters:
       - offset: 0.167
   - platform: dallas_temp
+    id: probe_8
     address: 0xda000000db070028
     name: "East Wing return temperature"
-    update_interval: 5s
+    update_interval: never   # read by boiler_bus in quiet slots of the bus (probes: below)
+    force_update: true
   - platform: dallas_temp
+    id: probe_9
     address: 0x66000000dc0c0d28
     name: "Garage supply temperature"
-    update_interval: 5s
+    update_interval: never   # read by boiler_bus in quiet slots of the bus (probes: below)
+    force_update: true
     filters:
       - offset: -0.111
   - platform: dallas_temp
+    id: probe_10
     address: 0xc4000000db7bd928
     name: "Garage return temperature"
-    update_interval: 5s
+    update_interval: never   # read by boiler_bus in quiet slots of the bus (probes: below)
+    force_update: true
     filters:
       - offset: 0.611
   - platform: copy

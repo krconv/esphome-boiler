@@ -3,6 +3,7 @@
 import esphome.codegen as cg
 from esphome.components.esp32 import include_builtin_idf_component
 from esphome.components import binary_sensor, sensor, text_sensor
+from esphome.components.dallas_temp.sensor import DallasTemperatureSensor
 import esphome.config_validation as cv
 from esphome import pins
 from esphome.const import (
@@ -21,7 +22,7 @@ from esphome.const import (
 )
 
 CODEOWNERS = ["@krconv"]
-AUTO_LOAD = ["sensor", "binary_sensor", "text_sensor"]
+AUTO_LOAD = ["sensor", "binary_sensor", "text_sensor", "one_wire", "dallas_temp"]
 DEPENDENCIES = ["esp32"]
 
 boiler_bus_ns = cg.esphome_ns.namespace("boiler_bus")
@@ -39,6 +40,8 @@ CONF_FAN_STALE = "fan_stale_timeout"
 CONF_PING_DELAY = "ping_delay"
 CONF_FAST_GAP = "fast_gap"
 CONF_MIN_INTERVAL = "min_interval"
+CONF_PROBES = "probes"
+CONF_PROBE_INTERVAL = "probe_interval"
 
 CAT = ENTITY_CATEGORY_DIAGNOSTIC
 MEAS = STATE_CLASS_MEASUREMENT
@@ -170,6 +173,10 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_FAST_GAP, default="46ms"): cv.positive_time_period_milliseconds,
         # minimum time between our requests (never below 120 ms; the display does ~130 ms)
         cv.Optional(CONF_MIN_INTERVAL, default="250ms"): cv.positive_time_period_milliseconds,
+        # dallas_temp sensors (each with `update_interval: never`) that this component reads in quiet slots of the bus,
+        # so 1-Wire bit-banging never corrupts a boiler frame. Convert-all + one scratchpad read per slot.
+        cv.Optional(CONF_PROBES): cv.ensure_list(cv.use_id(DallasTemperatureSensor)),
+        cv.Optional(CONF_PROBE_INTERVAL, default="5s"): cv.positive_time_period_milliseconds,
         **{cv.Optional(k): sensor.sensor_schema(**v) for k, v in SENSORS.items()},
         **{cv.Optional(k): binary_sensor.binary_sensor_schema(**v) for k, v in BINARY_SENSORS.items()},
         **{cv.Optional(k): text_sensor.text_sensor_schema(**v) for k, v in TEXT_SENSORS.items()},
@@ -195,6 +202,9 @@ async def to_code(config):
     cg.add(var.set_ping_delay_ms(config[CONF_PING_DELAY]))
     cg.add(var.set_fast_gap_ms(config[CONF_FAST_GAP]))
     cg.add(var.set_min_interval_ms(config[CONF_MIN_INTERVAL]))
+    cg.add(var.set_probe_interval_ms(config[CONF_PROBE_INTERVAL]))
+    for pid in config.get(CONF_PROBES, []):
+        cg.add(var.add_probe(await cg.get_variable(pid)))
 
     for key in SENSORS:
         if key in config:
